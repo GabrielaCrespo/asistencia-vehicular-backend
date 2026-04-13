@@ -17,7 +17,7 @@ app.add_middleware(
         "http://localhost:4200",      # Frontend dev
         "http://localhost:3000",      # Alternativo
         "http://127.0.0.1:4200",
-        "https://*.asistencia-vehicular.com",  # Producción
+        "https://asistencia-vehicular-frontend.onrender.com",  # Producción
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -1,10 +1,11 @@
 import os
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.routes.auth_router import router as auth_router
 from app.services.config import Config
+from app.classes.postgresql import Database
 
 app = FastAPI(
     title="Asistencia Vehicular API",
@@ -52,8 +53,28 @@ def index():
     }
 
 @app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+def health_check(db=Depends(Database.get_db)):
+    """
+    Health check avanzado que verifica:
+    - Servidor levantado
+    - Conexión a BD
+    - Base de datos accesible
+    """
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "version": "1.0.0"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e)
+        }, 503
 
 if __name__ == "__main__":
     uvicorn.run("app.run:app", host="0.0.0.0", port=8000, reload=True)

@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 import bcrypt
 import jwt
 
-from app.services.config import Config
-from app.classes.postgresql import Database
+from ..services.config import Config
+from ..classes.postgresql import Database
 
 # Router para autenticación de talleres
 router = APIRouter(prefix="/api/taller", tags=["Taller Authentication"])

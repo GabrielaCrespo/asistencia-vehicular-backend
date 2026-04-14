@@ -3,9 +3,9 @@ import uvicorn
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routes.auth_router import router as auth_router
-from app.services.config import Config
-from app.classes.postgresql import Database
+from .routes.auth_router import router as auth_router
+from .services.config import Config
+from .classes.postgresql import Database
 
 app = FastAPI(
     title="Asistencia Vehicular API",

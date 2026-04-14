@@ -1,6 +1,6 @@
 import psycopg2
 from fastapi import HTTPException
-from app.services.config import Config
+from ..services.config import Config
 import logging
 
 logger = logging.getLogger(__name__)

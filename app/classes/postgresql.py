@@ -60,12 +60,14 @@ class Database:
                 status_code=503,
                 detail="No se pudo conectar a la base de datos."
             )
+        except HTTPException:
+                raise
         except Exception as e:
-            logger.error(f"❌ Error inesperado BD: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            raise HTTPException(
-                status_code=503,
-                detail=f"Error en base de datos: {type(e).__name__}"
-            )
+                    logger.error(f"❌ Error inesperado BD: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Error en base de datos: {type(e).__name__}"
+                    )
         finally:
             if conn is not None and pool is not None:
                 try:

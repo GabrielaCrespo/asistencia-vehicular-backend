@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
 from .routes.auth_router import router as auth_router
+from .routes.cliente_router import router as cliente_router
 from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
 from .services.config import Config
@@ -17,21 +18,24 @@ app = FastAPI(
 )
 
 # Configurar CORS para permitir solicitudes del frontend
-_frontend_url = os.getenv("FRONTEND_URL", "https://asistencia-vehicular-frontend.onrender.com")
-_allowed_origins = list({
-    "http://localhost:4200",
-    "http://localhost:3000",
-    "http://127.0.0.1:4200",
-    "https://asistencia-vehicular-frontend.onrender.com",
-    _frontend_url,
-})
+#_frontend_url = os.getenv("FRONTEND_URL", "https://asistencia-vehicular-frontend.onrender.com")
+#_allowed_origins = list({
+#   "http://localhost:4200",
+#    "http://localhost:3000",
+#    "http://127.0.0.1:4200",
+#    "http://localhost:8080",
+#    "http://localhost:60600",
+#    "http://127.0.0.1:60600",
+#    "http://localhost:*",
+#    "https://asistencia-vehicular-frontend.onrender.com",
+#    _frontend_url,
+#})
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
-    expose_headers=["*"],
     allow_headers=["*"],
 )
 
@@ -49,6 +53,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # Incluir routers
 app.include_router(auth_router)
+app.include_router(cliente_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
 

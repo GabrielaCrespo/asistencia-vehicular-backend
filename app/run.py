@@ -1,9 +1,12 @@
 import os
 import uvicorn
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exception_handlers import http_exception_handler
 from .routes.auth_router import router as auth_router
+from .routes.tecnicos_router import router as tecnicos_router
+from .routes.servicios_router import router as servicios_router
 from .services.config import Config
 from .classes.postgresql import Database
 
@@ -32,10 +35,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Handler global: captura cualquier excepción no manejada
-# Esto garantiza que los headers CORS estén presentes incluso en errores 500
+# Handler global: garantiza headers CORS en todos los errores.
+# Re-delega HTTPException al handler nativo de FastAPI para que
+# el status code y el detail originales lleguen al cliente.
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return await http_exception_handler(request, exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "Error interno del servidor"},
@@ -43,6 +49,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 # Incluir routers
 app.include_router(auth_router)
+app.include_router(tecnicos_router)
+app.include_router(servicios_router)
 
 @app.get("/")
 def index():

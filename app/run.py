@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
 from .routes.auth_router import router as auth_router
 from .routes.cliente_router import router as cliente_router
+from .routes.vehiculo_router import router as vehiculo_router
 from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
 from .services.config import Config
@@ -54,8 +55,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # Incluir routers
 app.include_router(auth_router)
 app.include_router(cliente_router)
+app.include_router(vehiculo_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
+
 
 @app.get("/")
 def index():

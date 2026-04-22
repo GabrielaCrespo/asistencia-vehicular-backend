@@ -4,12 +4,14 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.staticfiles import StaticFiles
 from .routes.auth_router import router as auth_router
 from .routes.cliente_router import router as cliente_router
 from .routes.vehiculo_router import router as vehiculo_router
 from .routes.emergencia_router import router as emergencia_router
 from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
+from .routes.asignacion_router import router as asignacion_router
 from .services.config import Config
 from .classes.postgresql import Database
 
@@ -53,6 +55,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"detail": "Error interno del servidor"},
     )
 
+# Servir archivos subidos (imágenes de incidentes)
+_img_dir = os.path.join(os.path.dirname(__file__), "..", "imagenes_incidentes")
+os.makedirs(_img_dir, exist_ok=True)
+app.mount("/imagenes", StaticFiles(directory=_img_dir), name="imagenes")
+
 # Incluir routers
 app.include_router(auth_router)
 app.include_router(cliente_router)
@@ -60,6 +67,7 @@ app.include_router(vehiculo_router)
 app.include_router(emergencia_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
+app.include_router(asignacion_router)
 
 
 @app.get("/")

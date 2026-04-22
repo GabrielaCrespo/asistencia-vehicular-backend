@@ -69,15 +69,16 @@ async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_d
         cur.execute("""
             INSERT INTO INCIDENTE (
                 usuario_id, vehiculo_id, descripcion,
-                latitud, longitud, estado, prioridad,
+                tipo_problema, latitud, longitud, estado, prioridad,
                 imagen_path, audio_path
             )
-            VALUES (%s, %s, %s, %s, %s, 'pendiente', 'normal', %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pendiente', 'normal', %s, %s)
             RETURNING incidente_id
         """, (
             data.usuario_id,
             data.vehiculo_id,
             data.descripcion,
+            data.tipo_problema,
             data.latitud,
             data.longitud,
             data.imagen_path,

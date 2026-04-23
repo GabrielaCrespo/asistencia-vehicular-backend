@@ -3,20 +3,19 @@ from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 import jwt
+import bcrypt
 
 from ..services.config import Config
 from ..classes.postgresql import Database
-from passlib.context import CryptContext
 
 router = APIRouter(prefix="/api/cliente", tags=["Cliente Authentication"])
 
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(password: str, hashed: str) -> bool:
-    return pwd_context.verify(password, hashed)
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 # ===================== MODELOS REQUEST =====================
 

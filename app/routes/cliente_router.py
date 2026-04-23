@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import jwt
 import bcrypt
 
@@ -145,7 +145,7 @@ async def login_cliente(data: LoginRequest, db=Depends(Database.get_db)):
         token_payload = {
             "sub": str(user['usuario_id']),
             "email": user['email'],
-            "exp": datetime.utcnow() + timedelta(hours=24)
+            "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24)
         }
         token = jwt.encode(
             token_payload,

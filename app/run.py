@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.staticfiles import StaticFiles
 from .routes.auth_router import router as auth_router
 from .routes.cliente_router import router as cliente_router
 from .routes.vehiculo_router import router as vehiculo_router
@@ -65,6 +66,11 @@ app.include_router(asignacion_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
 app.include_router(talleres_router)
+
+# Servir imágenes subidas por los clientes
+_img_dir = os.path.join(os.getcwd(), "imagenes_incidentes")
+os.makedirs(_img_dir, exist_ok=True)
+app.mount("/imagenes", StaticFiles(directory=_img_dir), name="imagenes")
 
 
 @app.get("/")

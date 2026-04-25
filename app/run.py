@@ -12,8 +12,10 @@ from .routes.emergencia_router import router as emergencia_router
 from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
 from .routes.asignacion_router import router as asignacion_router
+from .routes.talleres_router import router as talleres_router
 from .services.config import Config
 from .classes.postgresql import Database
+
 
 app = FastAPI(
     title="Asistencia Vehicular API",
@@ -68,6 +70,7 @@ app.include_router(emergencia_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
 app.include_router(asignacion_router)
+app.include_router(talleres_router)
 
 
 @app.get("/")

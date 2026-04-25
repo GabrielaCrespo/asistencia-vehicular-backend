@@ -26,6 +26,7 @@ class EmergenciaCreate(BaseModel):
 @router.post("/subir-imagen")
 async def subir_imagen(imagen: UploadFile = File(...)):
     """Sube una imagen del incidente"""
+    
     try:
         # Crear carpeta si no existe
         carpeta = "imagenes_incidentes"
@@ -43,6 +44,28 @@ async def subir_imagen(imagen: UploadFile = File(...)):
         return {
             "success": True,
             "imagen_path": ruta,
+            "nombre": nombre_archivo
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/subir-audio")
+async def subir_audio(audio: UploadFile = File(...)):
+    """Sube un audio del incidente"""
+    try:
+        carpeta = "audios_incidentes"
+        os.makedirs(carpeta, exist_ok=True)
+
+        extension = audio.filename.split(".")[-1]
+        nombre_archivo = f"{uuid.uuid4()}.{extension}"
+        ruta = f"{carpeta}/{nombre_archivo}"
+
+        with open(ruta, "wb") as buffer:
+            shutil.copyfileobj(audio.file, buffer)
+
+        return {
+            "success": True,
+            "audio_path": ruta,
             "nombre": nombre_archivo
         }
 

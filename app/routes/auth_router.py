@@ -130,6 +130,7 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
         cur.execute("""
             INSERT INTO TALLER (usuario_id, razon_social, direccion, latitud, longitud, telefono_operativo, horario_inicio, horario_fin, disponible)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            RETURNING taller_id
         """, (
             nuevo_usuario_id,
             data.razon_social.upper(),
@@ -140,6 +141,16 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
             data.horario_inicio,
             data.horario_fin
         ))
+        nuevo_taller_id = cur.fetchone()[0]
+
+        # 3. Vincular todos los servicios base con disponible=FALSE para que el taller los active
+        cur.execute("""
+            INSERT INTO TALLER_SERVICIO (taller_id, servicio_id, disponible)
+            SELECT %s, s.servicio_id, FALSE
+            FROM SERVICIO s
+            WHERE s.categoria IN ('ELECTRICO', 'AUXILIO', 'MECANICA', 'GRUA', 'OTROS')
+            ON CONFLICT (taller_id, servicio_id) DO NOTHING
+        """, (nuevo_taller_id,))
 
         db.commit()
         return RegisterResponse(

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import jwt
+import unicodedata
 from typing import List, Optional
 
 from ..services.config import Config
@@ -35,12 +36,14 @@ class SolicitudDisponibleResponse(BaseModel):
     fecha_creacion: str
     imagen_path: Optional[str]
     audio_path: Optional[str]
+    tipo_problema: Optional[str]
     cliente_nombre: str
     cliente_telefono: str
     marca: str
     modelo: str
     placa: str
     vehiculo_tipo: Optional[str]
+    distancia_km: Optional[float]
 
 
 class SolicitudAsignadaResponse(BaseModel):
@@ -169,12 +172,14 @@ def _row_to_disponible(row: dict) -> SolicitudDisponibleResponse:
         fecha_creacion=str(row['fecha_creacion']),
         imagen_path=row['imagen_path'],
         audio_path=row['audio_path'],
+        tipo_problema=row.get('tipo_problema'),
         cliente_nombre=row['cliente_nombre'],
         cliente_telefono=row['cliente_telefono'],
         marca=row['marca'],
         modelo=row['modelo'],
         placa=row['placa'],
         vehiculo_tipo=row.get('vehiculo_tipo'),
+        distancia_km=float(row['distancia_km']) if row.get('distancia_km') is not None else None,
     )
 
 
@@ -203,41 +208,146 @@ def _row_to_asignada(row: dict) -> SolicitudAsignadaResponse:
     )
 
 
+def _norm(s: str) -> str:
+    """Normaliza una categoría: mayúsculas y sin acentos."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s.upper().strip())
+        if unicodedata.category(c) != 'Mn'
+    )
+
+
 # ===================== ENDPOINTS =====================
 
 @router.get("/solicitudes/disponibles", response_model=List[SolicitudDisponibleResponse])
 async def listar_solicitudes_disponibles(
+    max_km: float = 30.0,
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
     """
-    Lista todos los incidentes con estado='pendiente'.
-    Cualquier taller autenticado puede verlos.
+    Lista incidentes pendientes filtrando por distancia, disponibilidad
+    del taller y match de servicios ofrecidos vs requeridos.
     """
     token_payload = get_token_from_header(authorization)
+    usuario_id = int(token_payload.get("sub"))
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
+        # 1. Obtener datos del taller solicitante
         cur.execute("""
+            SELECT taller_id, latitud, longitud, disponible
+            FROM TALLER WHERE usuario_id = %s
+        """, (usuario_id,))
+        taller = cur.fetchone()
+        if not taller:
+            raise HTTPException(status_code=404, detail="Taller no encontrado")
+        if not taller['disponible']:
+            return []
+
+        # 1b. Verificar horario operativo si el taller lo tiene configurado.
+        # Si horario_inicio = horario_fin (ej: 00:00 - 00:00) se interpreta como 24 horas.
+        cur.execute("""
+            SELECT
+                horario_inicio IS NOT NULL AND horario_fin IS NOT NULL AS tiene_horario,
+                (horario_inicio = horario_fin)
+                OR (CURRENT_TIME BETWEEN horario_inicio AND horario_fin) AS en_horario
+            FROM TALLER WHERE taller_id = %s
+        """, (taller['taller_id'],))
+        horario_row = cur.fetchone()
+        if horario_row and horario_row['tiene_horario'] and not horario_row['en_horario']:
+            return []
+
+        # 2. Categorías de servicios que ofrece el taller (normalizadas a mayúsculas)
+        cur.execute("""
+            SELECT DISTINCT UPPER(TRIM(s.categoria)) AS categoria
+            FROM TALLER_SERVICIO ts
+            JOIN SERVICIO s ON ts.servicio_id = s.servicio_id
+            WHERE ts.taller_id = %s AND ts.disponible = TRUE
+              AND s.categoria IS NOT NULL
+        """, (taller['taller_id'],))
+        categorias = [_norm(row['categoria']) for row in cur.fetchall() if row['categoria']]
+
+        if not categorias:
+            return []
+
+        t_lat = float(taller['latitud']) if taller['latitud'] is not None else None
+        t_lng = float(taller['longitud']) if taller['longitud'] is not None else None
+        has_loc = t_lat is not None and t_lng is not None
+
+        haversine = """6371 * acos(LEAST(1.0,
+            cos(radians(%s)) * cos(radians(i.latitud)) * cos(radians(i.longitud) - radians(%s))
+            + sin(radians(%s)) * sin(radians(i.latitud))
+        ))"""
+
+        dist_select = haversine if has_loc else "NULL"
+
+        query = f"""
             SELECT
                 i.incidente_id, i.descripcion, i.latitud, i.longitud,
                 i.estado, i.prioridad, i.fecha_creacion,
-                i.imagen_path, i.audio_path,
+                i.imagen_path, i.audio_path, i.tipo_problema,
                 u.nombre  AS cliente_nombre,
                 u.telefono AS cliente_telefono,
                 v.marca, v.modelo, v.placa,
-                v.tipo    AS vehiculo_tipo
+                v.tipo    AS vehiculo_tipo,
+                {dist_select} AS distancia_km
             FROM INCIDENTE i
             JOIN USUARIO  u ON i.usuario_id  = u.usuario_id
             JOIN VEHICULO v ON i.vehiculo_id = v.vehiculo_id
             WHERE i.estado = 'pendiente'
+              AND NOT EXISTS (
+                SELECT 1 FROM ASIGNACION rej
+                WHERE rej.incidente_id = i.incidente_id
+                  AND rej.taller_id = %s
+                  AND rej.estado = 'rechazada'
+              )
+        """
+        # Los %s se sustituyen en orden de aparición en el SQL:
+        # 1) haversine en SELECT (3 params, solo si has_loc)
+        # 2) rej.taller_id en NOT EXISTS (1 param)
+        # 3) categorías en IN (n params)
+        params: list = []
+        if has_loc:
+            params += [t_lat, t_lng, t_lat]   # para dist_select en SELECT
+
+        params += [taller['taller_id']]        # para NOT EXISTS en WHERE
+
+        # Filtro de compatibilidad directo sobre tipo_problema del incidente.
+        # Usa el mismo mapeo que emergencia_router para ser consistente.
+        # Si el incidente no tiene tipo_problema → visible para cualquier taller.
+        TIPO_MAP = {
+            'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
+            'llanta':  'AUXILIO',
+            'motor':   'MECANICA',
+            'choque':  'GRUA',
+            'otros':   'OTROS',
+        }
+        case_branches = ' '.join(
+            f"WHEN '{k}' THEN '{v}'" for k, v in TIPO_MAP.items()
+        )
+        case_expr = f"CASE LOWER(TRIM(i.tipo_problema)) {case_branches} ELSE 'OTROS' END"
+
+        if categorias:
+            ph = ','.join(['%s'] * len(categorias))
+            query += f"""
+              AND (
+                i.tipo_problema IS NULL
+                OR ({case_expr}) IN ({ph})
+              )"""
+            params += categorias
+
+        query += """
             ORDER BY
                 CASE WHEN i.prioridad = 'urgente' THEN 0 ELSE 1 END,
-                i.fecha_creacion ASC
-        """)
+                distancia_km ASC NULLS LAST
+        """
+
+        cur.execute(query, params)
         rows = cur.fetchall()
         return [_row_to_disponible(dict(r)) for r in rows]
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listando solicitudes: {str(e)}")
     finally:
@@ -494,6 +604,13 @@ async def aceptar_solicitud(
             SET estado = 'asignada', fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE incidente_id = %s
         """, (data.incidente_id,))
+
+        # Marcar técnico como no disponible si fue asignado al aceptar
+        if data.tecnico_id:
+            cur.execute(
+                "UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s AND taller_id = %s",
+                (data.tecnico_id, taller_id)
+            )
 
         db.commit()
         return AsignacionResponse(

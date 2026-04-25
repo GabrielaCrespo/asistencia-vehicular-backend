@@ -1,14 +1,21 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from typing import Optional
-import os
-import shutil
-import uuid
+import cloudinary
+import cloudinary.uploader
 
 from ..classes.postgresql import Database
+from ..services.config import Config
 
 router = APIRouter(prefix="/api/emergencia", tags=["Emergencias"])
+
+cloudinary.config(
+    cloud_name=Config.CLOUDINARY_CLOUD_NAME,
+    api_key=Config.CLOUDINARY_API_KEY,
+    api_secret=Config.CLOUDINARY_API_SECRET,
+    secure=True,
+)
 
 # ===================== MODELOS =====================
 
@@ -25,50 +32,40 @@ class EmergenciaCreate(BaseModel):
 # ===================== ENDPOINTS =====================
 @router.post("/subir-imagen")
 async def subir_imagen(imagen: UploadFile = File(...)):
-    """Sube una imagen del incidente"""
-    
+    """Sube una imagen del incidente a Cloudinary"""
     try:
-        # Crear carpeta si no existe
-        carpeta = "imagenes_incidentes"
-        os.makedirs(carpeta, exist_ok=True)
-
-        # Generar nombre único
-        extension = imagen.filename.split(".")[-1]
-        nombre_archivo = f"{uuid.uuid4()}.{extension}"
-        ruta = f"{carpeta}/{nombre_archivo}"
-
-        # Guardar archivo
-        with open(ruta, "wb") as buffer:
-            shutil.copyfileobj(imagen.file, buffer)
-
+        contenido = await imagen.read()
+        resultado = cloudinary.uploader.upload(
+            contenido,
+            folder="imagenes_incidentes",
+            resource_type="image",
+        )
+        url = resultado["secure_url"]
+        nombre = resultado["public_id"].split("/")[-1]
         return {
             "success": True,
-            "imagen_path": ruta,
-            "nombre": nombre_archivo
+            "imagen_path": url,
+            "nombre": nombre,
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/subir-audio")
 async def subir_audio(audio: UploadFile = File(...)):
-    """Sube un audio del incidente"""
+    """Sube un audio del incidente a Cloudinary"""
     try:
-        carpeta = "audios_incidentes"
-        os.makedirs(carpeta, exist_ok=True)
-
-        extension = audio.filename.split(".")[-1]
-        nombre_archivo = f"{uuid.uuid4()}.{extension}"
-        ruta = f"{carpeta}/{nombre_archivo}"
-
-        with open(ruta, "wb") as buffer:
-            shutil.copyfileobj(audio.file, buffer)
-
+        contenido = await audio.read()
+        resultado = cloudinary.uploader.upload(
+            contenido,
+            folder="audios_incidentes",
+            resource_type="video",
+        )
+        url = resultado["secure_url"]
+        nombre = resultado["public_id"].split("/")[-1]
         return {
             "success": True,
-            "audio_path": ruta,
-            "nombre": nombre_archivo
+            "audio_path": url,
+            "nombre": nombre,
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/registrar")
@@ -109,6 +106,24 @@ async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_d
         ))
 
         incidente_id = cur.fetchone()[0]
+
+        # Vincular servicios requeridos según tipo_problema para filtrado posterior
+        if data.tipo_problema:
+            TIPO_MAP = {
+                'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
+                'llanta':  'AUXILIO',
+                'motor':   'MECANICA',
+                'choque':  'GRUA',
+                'otros':   'OTROS',
+            }
+            categoria_match = TIPO_MAP.get(data.tipo_problema.strip().lower(), 'OTROS')
+            cur.execute("""
+                INSERT INTO INCIDENTE_SERVICIO (incidente_id, servicio_id, recomendado_por_ia)
+                SELECT %s, s.servicio_id, TRUE FROM SERVICIO s
+                WHERE UPPER(TRIM(s.categoria)) = %s
+                ON CONFLICT (incidente_id, servicio_id) DO NOTHING
+            """, (incidente_id, categoria_match))
+
         db.commit()
 
         return {

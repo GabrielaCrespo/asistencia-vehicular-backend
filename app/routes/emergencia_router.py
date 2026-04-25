@@ -182,6 +182,8 @@ async def detalle_emergencia(incidente_id: int, db=Depends(Database.get_db)):
                 i.estado,
                 i.prioridad,
                 i.fecha_creacion,
+                i.imagen_path,
+                i.audio_path,
                 v.marca,
                 v.modelo,
                 v.placa,
@@ -195,7 +197,6 @@ async def detalle_emergencia(incidente_id: int, db=Depends(Database.get_db)):
             LEFT JOIN TALLER t ON a.taller_id = t.taller_id
             WHERE i.incidente_id = %s
         """, (incidente_id,))
-
         incidente = cur.fetchone()
 
         if not incidente:

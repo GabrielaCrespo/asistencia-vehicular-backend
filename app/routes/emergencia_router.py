@@ -108,6 +108,24 @@ async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_d
         ))
 
         incidente_id = cur.fetchone()[0]
+
+        # Vincular servicios requeridos según tipo_problema para filtrado posterior
+        if data.tipo_problema:
+            TIPO_MAP = {
+                'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
+                'llanta':  'AUXILIO',
+                'motor':   'MECANICA',
+                'choque':  'GRUA',
+                'otros':   'OTROS',
+            }
+            categoria_match = TIPO_MAP.get(data.tipo_problema.strip().lower(), 'OTROS')
+            cur.execute("""
+                INSERT INTO INCIDENTE_SERVICIO (incidente_id, servicio_id, recomendado_por_ia)
+                SELECT %s, s.servicio_id, TRUE FROM SERVICIO s
+                WHERE UPPER(TRIM(s.categoria)) = %s
+                ON CONFLICT (incidente_id, servicio_id) DO NOTHING
+            """, (incidente_id, categoria_match))
+
         db.commit()
 
         return {

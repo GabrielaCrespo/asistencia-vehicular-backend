@@ -461,20 +461,30 @@ async def eliminar_tecnico(
                 detail="Técnico no encontrado"
             )
         
-        # Verificar que no tiene asignaciones pendientes
+        # Verificar asignaciones activas (bloqueo operativo)
         cur.execute(
-            """SELECT COUNT(*) as count FROM ASIGNACION 
-               WHERE tecnico_id = %s AND estado IN ('pendiente', 'aceptada')""",
+            """SELECT COUNT(*) as count FROM ASIGNACION
+               WHERE tecnico_id = %s AND estado IN ('aceptada', 'en_camino', 'en_servicio')""",
             (tecnico_id,)
         )
-        result = cur.fetchone()
-        if result['count'] > 0:
+        if cur.fetchone()['count'] > 0:
             raise HTTPException(
                 status_code=400,
-                detail="No se puede eliminar un técnico con asignaciones activas"
+                detail="El técnico tiene servicios en curso. Espera a que finalicen antes de eliminarlo."
             )
-        
-        # Eliminar técnico
+
+        # Verificar si tiene historial (asignaciones completadas/rechazadas)
+        cur.execute(
+            "SELECT COUNT(*) as count FROM ASIGNACION WHERE tecnico_id = %s",
+            (tecnico_id,)
+        )
+        if cur.fetchone()['count'] > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="El técnico tiene historial de servicios y no puede eliminarse para preservar los registros. Puedes marcarlo como no disponible."
+            )
+
+        # Eliminar técnico (solo si no tiene ninguna asignación)
         cur.execute(
             "DELETE FROM TECNICO WHERE tecnico_id = %s AND taller_id = %s",
             (tecnico_id, taller_id)

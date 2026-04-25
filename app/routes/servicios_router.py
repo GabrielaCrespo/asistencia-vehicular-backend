@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import jwt
+import unicodedata
 from typing import List, Optional
 from datetime import datetime
 
@@ -18,6 +19,14 @@ from ..services.config import Config
 from ..classes.postgresql import Database
 
 router = APIRouter(prefix="/api/servicios", tags=["Servicios"])
+
+
+def _norm_cat(s: str) -> str:
+    """Normaliza una categoría: mayúsculas y sin acentos."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s.upper().strip())
+        if unicodedata.category(c) != 'Mn'
+    )
 
 
 # ===================== MODELOS REQUEST =====================
@@ -263,7 +272,7 @@ async def crear_servicio_catalogo(
         """, (
             data.nombre.upper(),
             data.descripcion,
-            data.categoria.upper() if data.categoria else None,
+            _norm_cat(data.categoria) if data.categoria else None,
             data.precio_base
         ))
 
@@ -317,7 +326,7 @@ async def crear_servicio_directo_en_taller(
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         nombre_normalizado = data.nombre.strip().upper()
-        categoria_normalizada = data.categoria.strip().upper() if data.categoria else None
+        categoria_normalizada = _norm_cat(data.categoria) if data.categoria else None
 
         # Paso 1: Buscar si el servicio ya existe en el catálogo global
         cur.execute(

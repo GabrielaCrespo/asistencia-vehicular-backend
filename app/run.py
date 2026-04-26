@@ -14,6 +14,7 @@ from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
 from .routes.asignacion_router import router as asignacion_router
 from .routes.talleres_router import router as talleres_router
+from .routes.tecnico_auth_router import router as tecnico_auth_router
 from .services.config import Config
 from .classes.postgresql import Database
 
@@ -73,6 +74,7 @@ app.include_router(tecnicos_router)
 app.include_router(servicios_router)
 app.include_router(asignacion_router)
 app.include_router(talleres_router)
+app.include_router(tecnico_auth_router)
 
 # Servir imágenes subidas por los clientes
 _img_dir = os.path.join(os.getcwd(), "imagenes_incidentes")

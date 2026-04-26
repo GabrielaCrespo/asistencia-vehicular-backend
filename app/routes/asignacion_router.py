@@ -92,6 +92,7 @@ class IaAnalisisResponse(BaseModel):
     resumen_automatico: Optional[str]
     recomendaciones: Optional[str]
     fecha_analisis: Optional[str]
+    prioridad_ia: Optional[str]
 
 
 class DetalleIncidenteResponse(BaseModel):
@@ -410,20 +411,33 @@ async def detalle_incidente(
         except Exception:
             db.rollback()  # limpiar estado de error en la conexión
 
-        # Análisis IA más reciente para este incidente
+        # Resolver taller_id del usuario autenticado
+        taller_id_viewer = None
+        try:
+            usuario_id_viewer = int(token_payload.get("sub"))
+            cur.execute("SELECT taller_id FROM TALLER WHERE usuario_id = %s", (usuario_id_viewer,))
+            t_row = cur.fetchone()
+            if t_row:
+                taller_id_viewer = t_row["taller_id"]
+        except Exception:
+            db.rollback()
+
+        # Análisis IA del taller autenticado para este incidente
         ia_row = None
         try:
-            cur.execute("""
-                SELECT
-                    tipo_entrada, transcripcion_audio, clasificacion,
-                    nivel_confianza, resultado_imagen,
-                    resumen_automatico, recomendaciones, fecha_analisis
-                FROM IA_ANALISIS
-                WHERE incidente_id = %s
-                ORDER BY fecha_analisis DESC
-                LIMIT 1
-            """, (incidente_id,))
-            ia_row = cur.fetchone()
+            if taller_id_viewer:
+                cur.execute("""
+                    SELECT
+                        tipo_entrada, transcripcion_audio, clasificacion,
+                        nivel_confianza, resultado_imagen,
+                        resumen_automatico, recomendaciones, fecha_analisis,
+                        datos_adicionales->>'prioridad_ia' AS prioridad_ia
+                    FROM IA_ANALISIS
+                    WHERE incidente_id = %s AND taller_id = %s
+                    ORDER BY fecha_analisis DESC
+                    LIMIT 1
+                """, (incidente_id, taller_id_viewer))
+                ia_row = cur.fetchone()
         except Exception:
             db.rollback()
 
@@ -457,6 +471,7 @@ async def detalle_incidente(
                 resumen_automatico=ia.get('resumen_automatico'),
                 recomendaciones=ia.get('recomendaciones'),
                 fecha_analisis=str(ia['fecha_analisis']) if ia.get('fecha_analisis') else None,
+                prioridad_ia=ia.get('prioridad_ia'),
             ) if ia else None,
         )
 

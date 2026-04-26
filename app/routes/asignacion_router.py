@@ -272,12 +272,14 @@ async def listar_solicitudes_disponibles(
 
         t_lat = float(taller['latitud']) if taller['latitud'] is not None else None
         t_lng = float(taller['longitud']) if taller['longitud'] is not None else None
-        has_loc = t_lat is not None and t_lng is not None
+        # Coordenadas (0,0) significan que el taller no tiene ubicación configurada
+        has_loc = (t_lat is not None and t_lng is not None
+                   and not (t_lat == 0.0 and t_lng == 0.0))
 
-        haversine = """6371 * acos(LEAST(1.0,
+        haversine = """6371 * acos(GREATEST(-1.0, LEAST(1.0,
             cos(radians(%s)) * cos(radians(i.latitud)) * cos(radians(i.longitud) - radians(%s))
             + sin(radians(%s)) * sin(radians(i.latitud))
-        ))"""
+        )))"""
 
         dist_select = haversine if has_loc else "NULL"
 
@@ -338,7 +340,12 @@ async def listar_solicitudes_disponibles(
 
         query += """
             ORDER BY
-                CASE WHEN i.prioridad = 'urgente' THEN 0 ELSE 1 END,
+                CASE
+                    WHEN i.prioridad IN ('alta', 'urgente') THEN 0
+                    WHEN i.prioridad = 'normal' THEN 1
+                    WHEN i.prioridad = 'baja' THEN 2
+                    ELSE 1
+                END,
                 distancia_km ASC NULLS LAST
         """
 

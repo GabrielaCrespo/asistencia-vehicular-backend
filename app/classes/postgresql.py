@@ -1,6 +1,7 @@
 import psycopg2
 import psycopg2.pool
 import traceback
+from typing import Optional
 from fastapi import HTTPException
 from ..services.config import Config
 import logging
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 # Pool global — se inicializa una sola vez al arrancar el servidor.
 # Las solicitudes posteriores reutilizan conexiones existentes (~<100ms)
 # en lugar de abrir una nueva cada vez (~3-5s a Render/Oregon).
-_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 
 
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:

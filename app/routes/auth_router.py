@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import bcrypt
 import jwt
@@ -227,7 +227,7 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
             "sub": str(user['usuario_id']),
             "taller_id": user['taller_id'],
             "email": user['email'],
-            "exp": datetime.utcnow() + timedelta(hours=24)
+            "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24)
         }
         token = jwt.encode(
             token_payload,

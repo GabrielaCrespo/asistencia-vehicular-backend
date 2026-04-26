@@ -11,6 +11,8 @@ from psycopg2.extras import RealDictCursor
 import jwt
 from typing import List, Optional
 from datetime import datetime
+from passlib.context import CryptContext
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 from ..services.config import Config
 from ..classes.postgresql import Database
@@ -52,6 +54,8 @@ class TecnicoResponse(BaseModel):
     disponible: bool
     fecha_ultima_ubicacion: Optional[str]
     creado_en: str
+    email_acceso: Optional[str] = None      
+    password_acceso: Optional[str] = None 
 
 
 class TecnicoListaResponse(BaseModel):
@@ -172,10 +176,40 @@ async def crear_tecnico(
                 detail="Taller no encontrado"
             )
         
-        # Insertar técnico
+        
+        # Generar credenciales automáticas
+        nombre_lower = data.nombre.lower().replace(" ", "")
+        email_tecnico = f"{nombre_lower}@tecnico.com"
+        password_tecnico = f"{nombre_lower}123"
+        password_hash = pwd_context.hash(password_tecnico)
+
+        # Verificar si el email ya existe
+        cur.execute(
+            "SELECT usuario_id FROM USUARIO WHERE email = %s",
+            (email_tecnico,)
+        )
+        if cur.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ya existe un técnico con el email {email_tecnico}"
+            )
+
+        # Crear usuario para el técnico con rol_id=3 (técnico)
         cur.execute("""
-            INSERT INTO TECNICO (taller_id, nombre, especialidad, disponible)
-            VALUES (%s, %s, %s, TRUE)
+            INSERT INTO USUARIO (rol_id, nombre, email, contrasena_hash, estado)
+            VALUES (3, %s, %s, %s, 'activo')
+            RETURNING usuario_id
+        """, (
+            data.nombre.upper(),
+            email_tecnico,
+            password_hash
+        ))
+        usuario_id = cur.fetchone()['usuario_id']
+
+        # Insertar técnico con usuario_id
+        cur.execute("""
+            INSERT INTO TECNICO (taller_id, nombre, especialidad, disponible, usuario_id)
+            VALUES (%s, %s, %s, TRUE, %s)
             RETURNING 
                 tecnico_id, taller_id, nombre, especialidad, 
                 latitud_actual, longitud_actual, disponible,
@@ -183,7 +217,8 @@ async def crear_tecnico(
         """, (
             taller_id,
             data.nombre.upper(),
-            data.especialidad.upper() if data.especialidad else None
+            data.especialidad.upper() if data.especialidad else None,
+            usuario_id
         ))
         
         tecnico = cur.fetchone()
@@ -198,7 +233,9 @@ async def crear_tecnico(
             longitud_actual=tecnico['longitud_actual'],
             disponible=tecnico['disponible'],
             fecha_ultima_ubicacion=str(tecnico['fecha_ultima_ubicacion']) if tecnico['fecha_ultima_ubicacion'] else None,
-            creado_en=str(tecnico['creado_en'])
+            creado_en=str(tecnico['creado_en']),
+            email_acceso=email_tecnico,
+            password_acceso=password_tecnico
         )
         
     except HTTPException:

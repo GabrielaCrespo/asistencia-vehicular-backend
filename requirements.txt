@@ -10,7 +10,7 @@ fastapi-cors==0.0.6
 greenlet==3.3.2
 h11==0.16.0
 idna==3.11
-passlib==1.7.4.1
+passlib==1.7.4
 psycopg2-binary==2.9.11
 pydantic==2.12.5
 pydantic[email]==2.12.5

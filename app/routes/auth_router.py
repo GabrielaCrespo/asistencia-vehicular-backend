@@ -362,10 +362,10 @@ async def get_taller_profile(
         row['telefono'] = row.get('telefono') or ''
         row['documento_identidad'] = row.get('documento_identidad') or ''
         row['direccion'] = row.get('direccion') or ''
-        row['latitud'] = row.get('latitud') or 0.0
-        row['longitud'] = row.get('longitud') or 0.0
+        row['latitud'] = row.get('latitud')
+        row['longitud'] = row.get('longitud')
         row['telefono_operativo'] = row.get('telefono_operativo') or ''
-        
+
         return TallerProfileResponse(**row)
     except HTTPException:
         raise
@@ -486,10 +486,10 @@ async def update_taller_profile(
         row['telefono'] = row.get('telefono') or ''
         row['documento_identidad'] = row.get('documento_identidad') or ''
         row['direccion'] = row.get('direccion') or ''
-        row['latitud'] = row.get('latitud') or 0.0
-        row['longitud'] = row.get('longitud') or 0.0
+        row['latitud'] = row.get('latitud')
+        row['longitud'] = row.get('longitud')
         row['telefono_operativo'] = row.get('telefono_operativo') or ''
-        
+
         # Convert time fields for response
         print(f"[UPDATE TALLER] 🕐 Converting time fields...")
         if row.get('horario_inicio'):

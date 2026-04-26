@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+import json
+
+import jwt
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from typing import Optional
@@ -138,6 +141,102 @@ async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_d
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+
+@router.post("/analizar-ia/{incidente_id}")
+async def analizar_ia(
+    incidente_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """
+    Procesa con IA el incidente. El análisis queda vinculado al taller
+    que lo solicita — otros talleres no lo ven.
+    """
+    # Autenticar y obtener taller_id
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token no proporcionado")
+    try:
+        token = authorization.split(" ")[1]
+        payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
+        usuario_id = int(payload.get("sub"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Resolver taller_id del usuario autenticado
+        cur.execute("SELECT taller_id FROM TALLER WHERE usuario_id = %s", (usuario_id,))
+        taller_row = cur.fetchone()
+        if not taller_row:
+            raise HTTPException(status_code=403, detail="Solo talleres pueden analizar incidentes")
+        taller_id = taller_row["taller_id"]
+
+        # Obtener datos del incidente
+        cur.execute("""
+            SELECT incidente_id, descripcion, tipo_problema, imagen_path, audio_path
+            FROM INCIDENTE WHERE incidente_id = %s
+        """, (incidente_id,))
+        inc = cur.fetchone()
+        if not inc:
+            raise HTTPException(status_code=404, detail="Incidente no encontrado")
+
+        # Llamar al servicio de IA
+        from ..services.ia_service import analizar_incidente
+        analisis = analizar_incidente(
+            descripcion=inc["descripcion"] or "",
+            tipo_problema=inc.get("tipo_problema"),
+            imagen_url=inc.get("imagen_path"),
+            audio_url=inc.get("audio_path"),
+        )
+
+        # Guardar en IA_ANALISIS vinculado a este taller
+        cur.execute("""
+            INSERT INTO IA_ANALISIS (
+                incidente_id, taller_id, tipo_entrada, transcripcion_audio, clasificacion,
+                nivel_confianza, resultado_imagen, resumen_automatico,
+                recomendaciones, datos_adicionales
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            incidente_id,
+            taller_id,
+            analisis.get("tipo_entrada"),
+            analisis.get("transcripcion_audio"),
+            analisis.get("clasificacion"),
+            analisis.get("nivel_confianza"),
+            analisis.get("resultado_imagen"),
+            analisis.get("resumen_automatico"),
+            analisis.get("recomendaciones"),
+            json.dumps({"prioridad_ia": analisis.get("prioridad")}),
+        ))
+
+        # Actualizar prioridad del incidente según la IA
+        prioridad = analisis.get("prioridad", "normal")
+        if prioridad not in ("alta", "normal", "baja"):
+            prioridad = "normal"
+        cur.execute("""
+            UPDATE INCIDENTE
+            SET prioridad = %s, fecha_actualizacion = CURRENT_TIMESTAMP
+            WHERE incidente_id = %s
+        """, (prioridad, incidente_id))
+
+        db.commit()
+        return {"success": True, "analisis": analisis}
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(e))
+    except json.JSONDecodeError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="La IA devolvió un formato inesperado. Intenta nuevamente.")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error en análisis de IA: {str(e)}")
     finally:
         cur.close()
 

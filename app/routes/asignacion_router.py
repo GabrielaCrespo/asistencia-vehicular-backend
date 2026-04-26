@@ -369,7 +369,7 @@ async def detalle_incidente(
     db=Depends(Database.get_db)
 ):
     """Detalle completo de un incidente (cliente, vehículo, evidencias)."""
-    get_token_from_header(authorization)
+    token_payload = get_token_from_header(authorization)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

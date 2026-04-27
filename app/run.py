@@ -12,10 +12,11 @@ from .routes.emergencia_router import router as emergencia_router
 from .routes.asignacion_router import router as asignacion_router
 from .routes.tecnicos_router import router as tecnicos_router
 from .routes.servicios_router import router as servicios_router
-from .routes.asignacion_router import router as asignacion_router
 from .routes.talleres_router import router as talleres_router
 from .routes.pagos_router import router as pagos_router
 from .routes.tecnico_auth_router import router as tecnico_auth_router
+from .routes.notificaciones_router import router as notificaciones_router
+from .routes.historial_router import router as historial_router
 from .services.config import Config
 from .classes.postgresql import Database
 
@@ -73,15 +74,11 @@ app.include_router(emergencia_router)
 app.include_router(asignacion_router)
 app.include_router(tecnicos_router)
 app.include_router(servicios_router)
-app.include_router(asignacion_router)
 app.include_router(talleres_router)
 app.include_router(pagos_router)
 app.include_router(tecnico_auth_router)
-
-# Servir imágenes subidas por los clientes
-_img_dir = os.path.join(os.getcwd(), "imagenes_incidentes")
-os.makedirs(_img_dir, exist_ok=True)
-app.mount("/imagenes", StaticFiles(directory=_img_dir), name="imagenes")
+app.include_router(notificaciones_router)
+app.include_router(historial_router)
 
 
 @app.get("/")

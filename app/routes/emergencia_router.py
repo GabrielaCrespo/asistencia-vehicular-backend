@@ -10,6 +10,7 @@ import cloudinary.uploader
 
 from ..classes.postgresql import Database
 from ..services.config import Config
+from ..utils.notificaciones import crear_notificacion
 
 router = APIRouter(prefix="/api/emergencia", tags=["Emergencias"])
 
@@ -126,6 +127,48 @@ async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_d
                 WHERE UPPER(TRIM(s.categoria)) = %s
                 ON CONFLICT (incidente_id, servicio_id) DO NOTHING
             """, (incidente_id, categoria_match))
+
+        # Notificar a los talleres disponibles que ofrecen el servicio requerido
+        try:
+            TIPO_MAP = {
+                'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
+                'llanta':  'AUXILIO',
+                'motor':   'MECANICA',
+                'choque':  'GRUA',
+                'otros':   'OTROS',
+            }
+            categoria_notif = None
+            if data.tipo_problema:
+                categoria_notif = TIPO_MAP.get(data.tipo_problema.strip().lower(), 'OTROS')
+
+            if categoria_notif:
+                cur.execute(
+                    """
+                    SELECT DISTINCT t.usuario_id
+                    FROM TALLER t
+                    JOIN TALLER_SERVICIO ts ON t.taller_id = ts.taller_id
+                    JOIN SERVICIO s ON ts.servicio_id = s.servicio_id
+                    WHERE t.disponible = TRUE
+                      AND ts.disponible = TRUE
+                      AND UPPER(TRIM(s.categoria)) = %s
+                    """,
+                    (categoria_notif,),
+                )
+            else:
+                cur.execute("SELECT usuario_id FROM TALLER WHERE disponible = TRUE")
+
+            taller_usuarios = [r[0] for r in cur.fetchall()]
+            desc_corta = (data.descripcion or "Sin descripción")[:120]
+            for uid in taller_usuarios:
+                crear_notificacion(
+                    db, uid,
+                    "nueva_emergencia",
+                    "Nueva emergencia disponible",
+                    f"Solicitud de auxilio: {desc_corta}",
+                    {"incidente_id": incidente_id, "tipo_problema": data.tipo_problema},
+                )
+        except Exception:
+            pass  # no interrumpir el flujo principal
 
         db.commit()
 

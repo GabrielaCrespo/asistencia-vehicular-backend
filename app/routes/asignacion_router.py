@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.notificaciones import crear_notificacion
 
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
 
@@ -634,6 +635,22 @@ async def aceptar_solicitud(
                 (data.tecnico_id, taller_id)
             )
 
+        # Notificar al cliente que su solicitud fue aceptada
+        cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
+        inc_row = cur.fetchone()
+        if inc_row:
+            cliente_uid = inc_row["usuario_id"]
+            cur.execute("SELECT razon_social FROM TALLER WHERE taller_id = %s", (taller_id,))
+            taller_row = cur.fetchone()
+            razon = taller_row["razon_social"] if taller_row else "Un taller"
+            crear_notificacion(
+                db, cliente_uid,
+                "solicitud_aceptada",
+                "Tu solicitud fue aceptada",
+                f"{razon} aceptó tu solicitud de asistencia y está en camino.",
+                {"incidente_id": data.incidente_id, "asignacion_id": asignacion_id, "taller_id": taller_id},
+            )
+
         db.commit()
         return AsignacionResponse(
             success=True,
@@ -684,6 +701,18 @@ async def rechazar_solicitud(
             )
             VALUES (%s, %s, 'rechazada', %s, CURRENT_TIMESTAMP)
         """, (data.incidente_id, taller_id, data.observaciones))
+
+        # Notificar al cliente que este taller no pudo atender
+        cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
+        inc_row = cur.fetchone()
+        if inc_row:
+            crear_notificacion(
+                db, inc_row["usuario_id"],
+                "solicitud_rechazada",
+                "Taller no disponible",
+                "Un taller no pudo atender tu solicitud. Seguimos buscando otro disponible.",
+                {"incidente_id": data.incidente_id, "taller_id": taller_id},
+            )
 
         db.commit()
         return MessageResponse(success=True, message="Solicitud rechazada")
@@ -806,6 +835,40 @@ async def actualizar_estado(
                     (asignacion['tecnico_id'],)
                 )
 
+        # Notificaciones según el nuevo estado
+        ESTADO_MSGS = {
+            'en_camino':   ("El técnico está en camino", "Tu técnico ya está en camino a tu ubicación."),
+            'en_servicio': ("El técnico llegó", "El técnico llegó a tu ubicación e inició el servicio."),
+            'completada':  ("Servicio completado", "El servicio ha finalizado. Puedes calificar la atención."),
+        }
+        if data.estado in ESTADO_MSGS:
+            titulo_c, desc_c = ESTADO_MSGS[data.estado]
+            cur.execute(
+                "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
+                (asignacion['incidente_id'],),
+            )
+            inc_row = cur.fetchone()
+            if inc_row:
+                crear_notificacion(
+                    db, inc_row["usuario_id"],
+                    f"estado_{data.estado}",
+                    titulo_c, desc_c,
+                    {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
+                )
+            if data.estado == 'completada':
+                cur.execute(
+                    "SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,)
+                )
+                taller_row = cur.fetchone()
+                if taller_row:
+                    crear_notificacion(
+                        db, taller_row["usuario_id"],
+                        "servicio_finalizado",
+                        "Servicio finalizado",
+                        "El servicio ha sido marcado como completado. Recuerda registrar el diagnóstico.",
+                        {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
+                    )
+
         db.commit()
         return MessageResponse(success=True, message=f"Estado actualizado a '{data.estado}'")
 
@@ -889,6 +952,33 @@ async def registrar_diagnostico(
             monto_taller,
             data.metodo_pago,
         ))
+
+        # Notificar al cliente: servicio completado
+        cur.execute(
+            "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
+            (asignacion['incidente_id'],),
+        )
+        inc_row = cur.fetchone()
+        if inc_row:
+            crear_notificacion(
+                db, inc_row["usuario_id"],
+                "servicio_completado",
+                "Servicio finalizado",
+                f"Tu asistencia vehicular ha concluido. Costo total: Bs {data.costo:.2f}.",
+                {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "costo": data.costo},
+            )
+
+        # Notificar al taller: pago procesado
+        cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
+        taller_row = cur.fetchone()
+        if taller_row:
+            crear_notificacion(
+                db, taller_row["usuario_id"],
+                "pago_procesado",
+                "Pago procesado",
+                f"Servicio completado. Recibirás Bs {monto_taller:.2f} (descontada comisión del 10%).",
+                {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "monto_taller": monto_taller},
+            )
 
         db.commit()
         return MessageResponse(success=True, message="Diagnóstico y costo registrados correctamente")

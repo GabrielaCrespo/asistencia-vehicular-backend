@@ -26,7 +26,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
             database=Config.DB_NAME,
             user=Config.DB_USER,
             password=Config.DB_PASS,
-            sslmode="prefer",
+            sslmode="require",
             connect_timeout=15,
             keepalives_count=5,
         )

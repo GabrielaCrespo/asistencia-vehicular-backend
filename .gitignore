@@ -1,9 +1,32 @@
+# ─── Credenciales y configuración local ──────────────────────────────────────
 .env
 .env.local
+.env.*.local
 .env.local.*
+
+# ─── Entornos virtuales Python ───────────────────────────────────────────────
 venv/
 .venv/
+env/
+ENV/
+
+# ─── Compilados y caché Python ───────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Imágenes y archivos subidos por usuarios ─────────────────────────────────
+imagenes_incidentes/*
+!imagenes_incidentes/.gitkeep
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+*.log
+
+# ─── Bases de datos locales ───────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db

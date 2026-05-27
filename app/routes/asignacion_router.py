@@ -248,11 +248,13 @@ async def listar_solicitudes_disponibles(
 
         # 1b. Verificar horario operativo si el taller lo tiene configurado.
         # Si horario_inicio = horario_fin (ej: 00:00 - 00:00) se interpreta como 24 horas.
+        # Usar hora Bolivia (UTC-4) porque la BD Render corre en UTC.
         cur.execute("""
             SELECT
                 horario_inicio IS NOT NULL AND horario_fin IS NOT NULL AS tiene_horario,
                 (horario_inicio = horario_fin)
-                OR (CURRENT_TIME BETWEEN horario_inicio AND horario_fin) AS en_horario
+                OR ((CURRENT_TIMESTAMP AT TIME ZONE 'America/La_Paz')::TIME
+                    BETWEEN horario_inicio AND horario_fin) AS en_horario
             FROM TALLER WHERE taller_id = %s
         """, (taller['taller_id'],))
         horario_row = cur.fetchone()

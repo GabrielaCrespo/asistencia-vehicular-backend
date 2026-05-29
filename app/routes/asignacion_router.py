@@ -2,31 +2,33 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 import jwt
+import asyncio
 import unicodedata
 from typing import List, Optional
-
+ 
 from ..services.config import Config
 from ..classes.postgresql import Database
 from ..utils.notificaciones import crear_notificacion
-
+from ..managers.websocket_manager import manager
+ 
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
-
-
+ 
+ 
 # ===================== MODELOS REQUEST =====================
-
+ 
 class AceptarSolicitudRequest(BaseModel):
     incidente_id: int
     tecnico_id: Optional[int] = None
     tiempo_estimado_minutos: Optional[int] = None
-
-
+ 
+ 
 class RechazarSolicitudRequest(BaseModel):
     incidente_id: int
     observaciones: Optional[str] = None
-
-
+ 
+ 
 # ===================== MODELOS RESPONSE =====================
-
+ 
 class SolicitudDisponibleResponse(BaseModel):
     incidente_id: int
     descripcion: str
@@ -45,8 +47,8 @@ class SolicitudDisponibleResponse(BaseModel):
     placa: str
     vehiculo_tipo: Optional[str]
     distancia_km: Optional[float]
-
-
+ 
+ 
 class SolicitudAsignadaResponse(BaseModel):
     asignacion_id: int
     incidente_id: int
@@ -68,22 +70,22 @@ class SolicitudAsignadaResponse(BaseModel):
     marca: str
     modelo: str
     placa: str
-
-
+ 
+ 
 class AsignarTecnicoRequest(BaseModel):
     tecnico_id: int
-
-
+ 
+ 
 class ActualizarEstadoRequest(BaseModel):
     estado: str  # en_camino | en_servicio | completada
-
-
+ 
+ 
 class DiagnosticoRequest(BaseModel):
     observaciones: str
     costo: float
     metodo_pago: Optional[str] = None
-
-
+ 
+ 
 class IaAnalisisResponse(BaseModel):
     tipo_entrada: Optional[str]
     transcripcion_audio: Optional[str]
@@ -94,8 +96,8 @@ class IaAnalisisResponse(BaseModel):
     recomendaciones: Optional[str]
     fecha_analisis: Optional[str]
     prioridad_ia: Optional[str]
-
-
+ 
+ 
 class DetalleIncidenteResponse(BaseModel):
     incidente_id: int
     descripcion: str
@@ -116,21 +118,21 @@ class DetalleIncidenteResponse(BaseModel):
     vehiculo_tipo: Optional[str]
     anio: Optional[int]
     ia_analisis: Optional[IaAnalisisResponse]
-
-
+ 
+ 
 class AsignacionResponse(BaseModel):
     success: bool
     message: str
     asignacion_id: int
-
-
+ 
+ 
 class MessageResponse(BaseModel):
     success: bool
     message: str
-
-
+ 
+ 
 # ===================== FUNCIONES AUXILIARES =====================
-
+ 
 def get_token_from_header(authorization: str = Header(None)) -> dict:
     if not authorization:
         raise HTTPException(status_code=401, detail="Token no proporcionado")
@@ -145,8 +147,8 @@ def get_token_from_header(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Token expirado")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token inválido")
-
-
+ 
+ 
 def verify_taller_access(token_payload: dict, taller_id: int, db) -> bool:
     usuario_id = int(token_payload.get("sub"))
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -161,8 +163,8 @@ def verify_taller_access(token_payload: dict, taller_id: int, db) -> bool:
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=f"Error verificando acceso: {str(e)}")
-
-
+ 
+ 
 def _row_to_disponible(row: dict) -> SolicitudDisponibleResponse:
     return SolicitudDisponibleResponse(
         incidente_id=row['incidente_id'],
@@ -183,8 +185,8 @@ def _row_to_disponible(row: dict) -> SolicitudDisponibleResponse:
         vehiculo_tipo=row.get('vehiculo_tipo'),
         distancia_km=float(row['distancia_km']) if row.get('distancia_km') is not None else None,
     )
-
-
+ 
+ 
 def _row_to_asignada(row: dict) -> SolicitudAsignadaResponse:
     return SolicitudAsignadaResponse(
         asignacion_id=row['asignacion_id'],
@@ -208,34 +210,29 @@ def _row_to_asignada(row: dict) -> SolicitudAsignadaResponse:
         modelo=row['modelo'],
         placa=row['placa'],
     )
-
-
+ 
+ 
 def _norm(s: str) -> str:
     """Normaliza una categoría: mayúsculas y sin acentos."""
     return ''.join(
         c for c in unicodedata.normalize('NFD', s.upper().strip())
         if unicodedata.category(c) != 'Mn'
     )
-
-
+ 
+ 
 # ===================== ENDPOINTS =====================
-
+ 
 @router.get("/solicitudes/disponibles", response_model=List[SolicitudDisponibleResponse])
 async def listar_solicitudes_disponibles(
     max_km: float = 30.0,
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """
-    Lista incidentes pendientes filtrando por distancia, disponibilidad
-    del taller y match de servicios ofrecidos vs requeridos.
-    """
     token_payload = get_token_from_header(authorization)
     usuario_id = int(token_payload.get("sub"))
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # 1. Obtener datos del taller solicitante
         cur.execute("""
             SELECT taller_id, latitud, longitud, disponible
             FROM TALLER WHERE usuario_id = %s
@@ -245,10 +242,7 @@ async def listar_solicitudes_disponibles(
             raise HTTPException(status_code=404, detail="Taller no encontrado")
         if not taller['disponible']:
             return []
-
-        # 1b. Verificar horario operativo si el taller lo tiene configurado.
-        # Si horario_inicio = horario_fin (ej: 00:00 - 00:00) se interpreta como 24 horas.
-        # Usar hora Bolivia (UTC-4) porque la BD Render corre en UTC.
+ 
         cur.execute("""
             SELECT
                 horario_inicio IS NOT NULL AND horario_fin IS NOT NULL AS tiene_horario,
@@ -260,8 +254,7 @@ async def listar_solicitudes_disponibles(
         horario_row = cur.fetchone()
         if horario_row and horario_row['tiene_horario'] and not horario_row['en_horario']:
             return []
-
-        # 2. Categorías de servicios que ofrece el taller (normalizadas a mayúsculas)
+ 
         cur.execute("""
             SELECT DISTINCT UPPER(TRIM(s.categoria)) AS categoria
             FROM TALLER_SERVICIO ts
@@ -270,23 +263,22 @@ async def listar_solicitudes_disponibles(
               AND s.categoria IS NOT NULL
         """, (taller['taller_id'],))
         categorias = [_norm(row['categoria']) for row in cur.fetchall() if row['categoria']]
-
+ 
         if not categorias:
             return []
-
+ 
         t_lat = float(taller['latitud']) if taller['latitud'] is not None else None
         t_lng = float(taller['longitud']) if taller['longitud'] is not None else None
-        # Coordenadas (0,0) significan que el taller no tiene ubicación configurada
         has_loc = (t_lat is not None and t_lng is not None
                    and not (t_lat == 0.0 and t_lng == 0.0))
-
+ 
         haversine = """6371 * acos(GREATEST(-1.0, LEAST(1.0,
             cos(radians(%s)) * cos(radians(i.latitud)) * cos(radians(i.longitud) - radians(%s))
             + sin(radians(%s)) * sin(radians(i.latitud))
         )))"""
-
+ 
         dist_select = haversine if has_loc else "NULL"
-
+ 
         query = f"""
             SELECT
                 i.incidente_id, i.descripcion, i.latitud, i.longitud,
@@ -308,19 +300,12 @@ async def listar_solicitudes_disponibles(
                   AND rej.estado = 'rechazada'
               )
         """
-        # Los %s se sustituyen en orden de aparición en el SQL:
-        # 1) haversine en SELECT (3 params, solo si has_loc)
-        # 2) rej.taller_id en NOT EXISTS (1 param)
-        # 3) categorías en IN (n params)
         params: list = []
         if has_loc:
-            params += [t_lat, t_lng, t_lat]   # para dist_select en SELECT
-
-        params += [taller['taller_id']]        # para NOT EXISTS en WHERE
-
-        # Filtro de compatibilidad directo sobre tipo_problema del incidente.
-        # Usa el mismo mapeo que emergencia_router para ser consistente.
-        # Si el incidente no tiene tipo_problema → visible para cualquier taller.
+            params += [t_lat, t_lng, t_lat]
+ 
+        params += [taller['taller_id']]
+ 
         TIPO_MAP = {
             'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
             'llanta':  'AUXILIO',
@@ -332,7 +317,7 @@ async def listar_solicitudes_disponibles(
             f"WHEN '{k}' THEN '{v}'" for k, v in TIPO_MAP.items()
         )
         case_expr = f"CASE LOWER(TRIM(i.tipo_problema)) {case_branches} ELSE 'OTROS' END"
-
+ 
         if categorias:
             ph = ','.join(['%s'] * len(categorias))
             query += f"""
@@ -341,7 +326,7 @@ async def listar_solicitudes_disponibles(
                 OR ({case_expr}) IN ({ph})
               )"""
             params += categorias
-
+ 
         query += """
             ORDER BY
                 CASE
@@ -352,32 +337,29 @@ async def listar_solicitudes_disponibles(
                 END,
                 distancia_km ASC NULLS LAST
         """
-
+ 
         cur.execute(query, params)
         rows = cur.fetchall()
         return [_row_to_disponible(dict(r)) for r in rows]
-
+ 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listando solicitudes: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.get("/incidente/{incidente_id}/detalle", response_model=DetalleIncidenteResponse)
 async def detalle_incidente(
     incidente_id: int,
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Detalle completo de un incidente (cliente, vehículo, evidencias)."""
     token_payload = get_token_from_header(authorization)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Datos del incidente + cliente + vehículo
-        # Usamos LEFT JOIN en VEHICULO por si vehiculo_id es NULL
         cur.execute("""
             SELECT
                 i.incidente_id, i.descripcion,
@@ -398,23 +380,18 @@ async def detalle_incidente(
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Incidente no encontrado")
-
+ 
         r = dict(row)
-
-        # tipo_problema: intentar leerlo si la columna ya existe en la BD
+ 
         tipo_problema = None
         try:
-            cur.execute(
-                "SELECT tipo_problema FROM INCIDENTE WHERE incidente_id = %s",
-                (incidente_id,)
-            )
+            cur.execute("SELECT tipo_problema FROM INCIDENTE WHERE incidente_id = %s", (incidente_id,))
             tp_row = cur.fetchone()
             if tp_row:
                 tipo_problema = tp_row.get('tipo_problema')
         except Exception:
-            db.rollback()  # limpiar estado de error en la conexión
-
-        # Resolver taller_id del usuario autenticado
+            db.rollback()
+ 
         taller_id_viewer = None
         try:
             usuario_id_viewer = int(token_payload.get("sub"))
@@ -424,8 +401,7 @@ async def detalle_incidente(
                 taller_id_viewer = t_row["taller_id"]
         except Exception:
             db.rollback()
-
-        # Análisis IA del taller autenticado para este incidente
+ 
         ia_row = None
         try:
             if taller_id_viewer:
@@ -443,9 +419,9 @@ async def detalle_incidente(
                 ia_row = cur.fetchone()
         except Exception:
             db.rollback()
-
+ 
         ia = dict(ia_row) if ia_row else None
-
+ 
         return DetalleIncidenteResponse(
             incidente_id=r['incidente_id'],
             descripcion=r['descripcion'],
@@ -477,25 +453,24 @@ async def detalle_incidente(
                 prioridad_ia=ia.get('prioridad_ia'),
             ) if ia else None,
         )
-
+ 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo detalle: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.get("/{taller_id}/asignadas", response_model=List[SolicitudAsignadaResponse])
 async def listar_asignadas(
     taller_id: int,
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Asignaciones activas (aceptada / en_camino / en_servicio) del taller."""
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -520,23 +495,22 @@ async def listar_asignadas(
         """, (taller_id,))
         rows = cur.fetchall()
         return [_row_to_asignada(dict(r)) for r in rows]
-
+ 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listando asignadas: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.get("/{taller_id}/historial", response_model=List[SolicitudAsignadaResponse])
 async def historial_asignaciones(
     taller_id: int,
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Historial completo de asignaciones del taller."""
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -560,13 +534,13 @@ async def historial_asignaciones(
         """, (taller_id,))
         rows = cur.fetchall()
         return [_row_to_asignada(dict(r)) for r in rows]
-
+ 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo historial: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.post("/{taller_id}/aceptar", response_model=AsignacionResponse, status_code=201)
 async def aceptar_solicitud(
     taller_id: int,
@@ -574,17 +548,11 @@ async def aceptar_solicitud(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """
-    Acepta un incidente pendiente.
-    - Crea ASIGNACION con estado='aceptada'.
-    - Cambia INCIDENTE.estado a 'asignada'.
-    """
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar que el incidente existe y sigue pendiente
         cur.execute(
             "SELECT incidente_id, estado FROM INCIDENTE WHERE incidente_id = %s",
             (data.incidente_id,)
@@ -597,8 +565,7 @@ async def aceptar_solicitud(
                 status_code=400,
                 detail=f"El incidente ya no está disponible (estado: {incidente['estado']})"
             )
-
-        # Verificar que no haya asignación activa de este taller para este incidente
+ 
         cur.execute("""
             SELECT asignacion_id FROM ASIGNACION
             WHERE incidente_id = %s AND taller_id = %s
@@ -606,8 +573,7 @@ async def aceptar_solicitud(
         """, (data.incidente_id, taller_id))
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="Ya tienes este incidente asignado")
-
-        # Crear la asignación
+ 
         cur.execute("""
             INSERT INTO ASIGNACION (
                 incidente_id, taller_id, tecnico_id, estado,
@@ -615,31 +581,25 @@ async def aceptar_solicitud(
             )
             VALUES (%s, %s, %s, 'aceptada', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             RETURNING asignacion_id
-        """, (
-            data.incidente_id,
-            taller_id,
-            data.tecnico_id,
-            data.tiempo_estimado_minutos,
-        ))
+        """, (data.incidente_id, taller_id, data.tecnico_id, data.tiempo_estimado_minutos))
         asignacion_id = cur.fetchone()['asignacion_id']
-
-        # Actualizar estado del incidente
+ 
         cur.execute("""
             UPDATE INCIDENTE
             SET estado = 'asignada', fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE incidente_id = %s
         """, (data.incidente_id,))
-
-        # Marcar técnico como no disponible si fue asignado al aceptar
+ 
         if data.tecnico_id:
             cur.execute(
                 "UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s AND taller_id = %s",
                 (data.tecnico_id, taller_id)
             )
-
-        # Notificar al cliente que su solicitud fue aceptada
+ 
         cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
         inc_row = cur.fetchone()
+        cliente_uid = None
+        razon = "Un taller"
         if inc_row:
             cliente_uid = inc_row["usuario_id"]
             cur.execute("SELECT razon_social FROM TALLER WHERE taller_id = %s", (taller_id,))
@@ -652,14 +612,26 @@ async def aceptar_solicitud(
                 f"{razon} aceptó tu solicitud de asistencia y está en camino.",
                 {"incidente_id": data.incidente_id, "asignacion_id": asignacion_id, "taller_id": taller_id},
             )
-
+ 
         db.commit()
+ 
+        # ✅ Notificar en tiempo real al cliente via WebSocket
+        if cliente_uid:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": "solicitud_aceptada",
+                "titulo": "¡Tu solicitud fue aceptada!",
+                "mensaje": f"{razon} aceptó tu solicitud de asistencia.",
+                "incidente_id": data.incidente_id,
+                "asignacion_id": asignacion_id,
+                "taller_id": taller_id
+            }))
+ 
         return AsignacionResponse(
             success=True,
             message="Solicitud aceptada correctamente",
             asignacion_id=asignacion_id,
         )
-
+ 
     except HTTPException:
         db.rollback()
         raise
@@ -668,8 +640,8 @@ async def aceptar_solicitud(
         raise HTTPException(status_code=500, detail=f"Error aceptando solicitud: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.post("/{taller_id}/rechazar", response_model=MessageResponse)
 async def rechazar_solicitud(
     taller_id: int,
@@ -677,17 +649,11 @@ async def rechazar_solicitud(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """
-    Rechaza un incidente.
-    - Registra ASIGNACION con estado='rechazada'.
-    - El incidente queda 'pendiente' para que otros talleres puedan aceptarlo.
-    """
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar que el incidente existe
         cur.execute(
             "SELECT incidente_id, estado FROM INCIDENTE WHERE incidente_id = %s",
             (data.incidente_id,)
@@ -695,16 +661,14 @@ async def rechazar_solicitud(
         incidente = cur.fetchone()
         if not incidente:
             raise HTTPException(status_code=404, detail="Incidente no encontrado")
-
-        # Registrar rechazo (sin cambiar el estado del incidente)
+ 
         cur.execute("""
             INSERT INTO ASIGNACION (
                 incidente_id, taller_id, estado, observaciones, fecha_asignacion
             )
             VALUES (%s, %s, 'rechazada', %s, CURRENT_TIMESTAMP)
         """, (data.incidente_id, taller_id, data.observaciones))
-
-        # Notificar al cliente que este taller no pudo atender
+ 
         cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
         inc_row = cur.fetchone()
         if inc_row:
@@ -715,10 +679,20 @@ async def rechazar_solicitud(
                 "Un taller no pudo atender tu solicitud. Seguimos buscando otro disponible.",
                 {"incidente_id": data.incidente_id, "taller_id": taller_id},
             )
-
+ 
         db.commit()
+ 
+        # ✅ Notificar en tiempo real al cliente via WebSocket
+        if inc_row:
+            asyncio.create_task(manager.send_to_user(inc_row["usuario_id"], {
+                "tipo": "solicitud_rechazada",
+                "titulo": "Taller no disponible",
+                "mensaje": "Un taller no pudo atender tu solicitud. Seguimos buscando.",
+                "incidente_id": data.incidente_id
+            }))
+ 
         return MessageResponse(success=True, message="Solicitud rechazada")
-
+ 
     except HTTPException:
         db.rollback()
         raise
@@ -727,8 +701,8 @@ async def rechazar_solicitud(
         raise HTTPException(status_code=500, detail=f"Error rechazando solicitud: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.put("/{taller_id}/{asignacion_id}/asignar-tecnico", response_model=MessageResponse)
 async def asignar_tecnico(
     taller_id: int,
@@ -737,10 +711,9 @@ async def asignar_tecnico(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Asigna un técnico disponible del taller a la asignación."""
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
@@ -752,36 +725,27 @@ async def asignar_tecnico(
             raise HTTPException(status_code=404, detail="Asignación no encontrada")
         if asignacion['estado'] not in ('aceptada', 'en_camino', 'en_servicio'):
             raise HTTPException(status_code=400, detail="No se puede asignar técnico en este estado")
-
+ 
         cur.execute(
             "SELECT tecnico_id FROM TECNICO WHERE tecnico_id = %s AND taller_id = %s AND disponible = TRUE",
             (data.tecnico_id, taller_id)
         )
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Técnico no encontrado o no disponible")
-
-        # Liberar técnico anterior si era distinto
+ 
         prev_tecnico_id = asignacion.get('tecnico_id')
         if prev_tecnico_id and prev_tecnico_id != data.tecnico_id:
-            cur.execute(
-                "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                (prev_tecnico_id,)
-            )
-
+            cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (prev_tecnico_id,))
+ 
         cur.execute(
             "UPDATE ASIGNACION SET tecnico_id = %s WHERE asignacion_id = %s",
             (data.tecnico_id, asignacion_id)
         )
-
-        # Marcar al nuevo técnico como no disponible
-        cur.execute(
-            "UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s",
-            (data.tecnico_id,)
-        )
-
+        cur.execute("UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s", (data.tecnico_id,))
+ 
         db.commit()
         return MessageResponse(success=True, message="Técnico asignado correctamente")
-
+ 
     except HTTPException:
         db.rollback()
         raise
@@ -790,8 +754,8 @@ async def asignar_tecnico(
         raise HTTPException(status_code=500, detail=f"Error asignando técnico: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.put("/{taller_id}/{asignacion_id}/estado", response_model=MessageResponse)
 async def actualizar_estado(
     taller_id: int,
@@ -800,14 +764,13 @@ async def actualizar_estado(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Actualiza el estado del servicio: en_camino → en_servicio → completada."""
     ESTADOS_VALIDOS = ('en_camino', 'en_servicio', 'completada')
     if data.estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Estado inválido. Opciones: {ESTADOS_VALIDOS}")
-
+ 
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
@@ -819,48 +782,42 @@ async def actualizar_estado(
             raise HTTPException(status_code=404, detail="Asignación no encontrada")
         if asignacion['estado'] == 'completada':
             raise HTTPException(status_code=400, detail="La asignación ya está completada")
-
+ 
         cur.execute(
             "UPDATE ASIGNACION SET estado = %s WHERE asignacion_id = %s",
             (data.estado, asignacion_id)
         )
-
-        # Si se completa: cerrar incidente y liberar técnico
+ 
         if data.estado == 'completada':
             cur.execute(
                 "UPDATE INCIDENTE SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP WHERE incidente_id = %s",
                 (asignacion['incidente_id'],)
             )
             if asignacion.get('tecnico_id'):
-                cur.execute(
-                    "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                    (asignacion['tecnico_id'],)
-                )
-
-        # Notificaciones según el nuevo estado
+                cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (asignacion['tecnico_id'],))
+ 
         ESTADO_MSGS = {
             'en_camino':   ("El técnico está en camino", "Tu técnico ya está en camino a tu ubicación."),
             'en_servicio': ("El técnico llegó", "El técnico llegó a tu ubicación e inició el servicio."),
             'completada':  ("Servicio completado", "El servicio ha finalizado. Puedes calificar la atención."),
         }
+ 
+        cliente_uid = None
+        titulo_c = desc_c = None
         if data.estado in ESTADO_MSGS:
             titulo_c, desc_c = ESTADO_MSGS[data.estado]
-            cur.execute(
-                "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
-                (asignacion['incidente_id'],),
-            )
+            cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (asignacion['incidente_id'],))
             inc_row = cur.fetchone()
             if inc_row:
+                cliente_uid = inc_row["usuario_id"]
                 crear_notificacion(
-                    db, inc_row["usuario_id"],
+                    db, cliente_uid,
                     f"estado_{data.estado}",
                     titulo_c, desc_c,
                     {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
                 )
             if data.estado == 'completada':
-                cur.execute(
-                    "SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,)
-                )
+                cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
                 taller_row = cur.fetchone()
                 if taller_row:
                     crear_notificacion(
@@ -870,10 +827,22 @@ async def actualizar_estado(
                         "El servicio ha sido marcado como completado. Recuerda registrar el diagnóstico.",
                         {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
                     )
-
+ 
         db.commit()
+ 
+        # ✅ Notificar en tiempo real al cliente via WebSocket
+        if cliente_uid and titulo_c:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": f"estado_{data.estado}",
+                "titulo": titulo_c,
+                "mensaje": desc_c,
+                "incidente_id": asignacion['incidente_id'],
+                "asignacion_id": asignacion_id,
+                "estado": data.estado
+            }))
+ 
         return MessageResponse(success=True, message=f"Estado actualizado a '{data.estado}'")
-
+ 
     except HTTPException:
         db.rollback()
         raise
@@ -882,8 +851,8 @@ async def actualizar_estado(
         raise HTTPException(status_code=500, detail=f"Error actualizando estado: {str(e)}")
     finally:
         cur.close()
-
-
+ 
+ 
 @router.put("/{taller_id}/{asignacion_id}/diagnostico", response_model=MessageResponse)
 async def registrar_diagnostico(
     taller_id: int,
@@ -892,10 +861,9 @@ async def registrar_diagnostico(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Registra diagnóstico, costo del servicio y cierra la asignación."""
     token_payload = get_token_from_header(authorization)
     verify_taller_access(token_payload, taller_id, db)
-
+ 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(
@@ -905,32 +873,23 @@ async def registrar_diagnostico(
         asignacion = cur.fetchone()
         if not asignacion:
             raise HTTPException(status_code=404, detail="Asignación no encontrada")
-
+ 
         comision = round(data.costo * 0.10, 2)
         monto_taller = round(data.costo * 0.90, 2)
-
-        # Actualizar observaciones y marcar completada
+ 
         cur.execute("""
-            UPDATE ASIGNACION
-            SET observaciones = %s, estado = 'completada'
+            UPDATE ASIGNACION SET observaciones = %s, estado = 'completada'
             WHERE asignacion_id = %s
         """, (data.observaciones, asignacion_id))
-
-        # Cerrar el incidente
+ 
         cur.execute("""
-            UPDATE INCIDENTE
-            SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP
+            UPDATE INCIDENTE SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE incidente_id = %s
         """, (asignacion['incidente_id'],))
-
-        # Liberar técnico asignado
+ 
         if asignacion.get('tecnico_id'):
-            cur.execute(
-                "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                (asignacion['tecnico_id'],)
-            )
-
-        # Registrar pago (INSERT OR UPDATE si ya existe)
+            cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (asignacion['tecnico_id'],))
+ 
         cur.execute("""
             INSERT INTO PAGO (
                 incidente_id, asignacion_id, monto_total, monto_servicio,
@@ -945,32 +904,21 @@ async def registrar_diagnostico(
                 metodo_pago = EXCLUDED.metodo_pago,
                 estado = 'completado',
                 fecha_pago = CURRENT_TIMESTAMP
-        """, (
-            asignacion['incidente_id'],
-            asignacion_id,
-            data.costo,
-            data.costo,
-            comision,
-            monto_taller,
-            data.metodo_pago,
-        ))
-
-        # Notificar al cliente: servicio completado
-        cur.execute(
-            "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
-            (asignacion['incidente_id'],),
-        )
+        """, (asignacion['incidente_id'], asignacion_id, data.costo, data.costo, comision, monto_taller, data.metodo_pago))
+ 
+        cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (asignacion['incidente_id'],))
         inc_row = cur.fetchone()
+        cliente_uid = None
         if inc_row:
+            cliente_uid = inc_row["usuario_id"]
             crear_notificacion(
-                db, inc_row["usuario_id"],
+                db, cliente_uid,
                 "servicio_completado",
                 "Servicio finalizado",
                 f"Tu asistencia vehicular ha concluido. Costo total: Bs {data.costo:.2f}.",
                 {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "costo": data.costo},
             )
-
-        # Notificar al taller: pago procesado
+ 
         cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
         taller_row = cur.fetchone()
         if taller_row:
@@ -981,10 +929,22 @@ async def registrar_diagnostico(
                 f"Servicio completado. Recibirás Bs {monto_taller:.2f} (descontada comisión del 10%).",
                 {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "monto_taller": monto_taller},
             )
-
+ 
         db.commit()
+ 
+        # ✅ Notificar en tiempo real al cliente via WebSocket
+        if cliente_uid:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": "servicio_completado",
+                "titulo": "Servicio finalizado",
+                "mensaje": f"Tu asistencia vehicular ha concluido. Costo total: Bs {data.costo:.2f}.",
+                "incidente_id": asignacion['incidente_id'],
+                "asignacion_id": asignacion_id,
+                "costo": data.costo
+            }))
+ 
         return MessageResponse(success=True, message="Diagnóstico y costo registrados correctamente")
-
+ 
     except HTTPException:
         db.rollback()
         raise

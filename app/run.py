@@ -1,6 +1,7 @@
 import os
+import jwt
 import uvicorn
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
@@ -19,6 +20,7 @@ from .routes.notificaciones_router import router as notificaciones_router
 from .routes.historial_router import router as historial_router
 from .services.config import Config
 from .classes.postgresql import Database
+from .managers.websocket_manager import manager
 
 
 app = FastAPI(
@@ -26,20 +28,6 @@ app = FastAPI(
     description="API REST para plataforma de asistencia vehicular con IA",
     version="1.0.0"
 )
-
-# Configurar CORS para permitir solicitudes del frontend
-#_frontend_url = os.getenv("FRONTEND_URL", "https://asistencia-vehicular-frontend.onrender.com")
-#_allowed_origins = list({
-#   "http://localhost:4200",
-#    "http://localhost:3000",
-#    "http://127.0.0.1:4200",
-#    "http://localhost:8080",
-#    "http://localhost:60600",
-#    "http://127.0.0.1:60600",
-#    "http://localhost:*",
-#    "https://asistencia-vehicular-frontend.onrender.com",
-#    _frontend_url,
-#})
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,9 +37,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Handler global: garantiza headers CORS en todos los errores.
-# Re-delega HTTPException al handler nativo de FastAPI para que
-# el status code y el detail originales lleguen al cliente.
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
@@ -61,7 +46,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"detail": "Error interno del servidor"},
     )
 
-# Servir archivos subidos (imágenes de incidentes)
+# Servir archivos subidos
 _img_dir = os.path.join(os.path.dirname(__file__), "..", "imagenes_incidentes")
 os.makedirs(_img_dir, exist_ok=True)
 app.mount("/imagenes", StaticFiles(directory=_img_dir), name="imagenes")
@@ -81,6 +66,34 @@ app.include_router(notificaciones_router)
 app.include_router(historial_router)
 
 
+# ===================== WEBSOCKET =====================
+@app.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(...)
+):
+    try:
+        payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
+        usuario_id = int(payload.get("sub"))
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(websocket, usuario_id)
+    try:
+        await websocket.send_json({
+            "tipo": "conexion_establecida",
+            "mensaje": "Conectado al sistema de tiempo real",
+            "usuario_id": usuario_id
+        })
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"tipo": "pong"})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, usuario_id)
+
+
 @app.get("/")
 def index():
     return {
@@ -91,12 +104,6 @@ def index():
 
 @app.get("/health")
 def health_check(db=Depends(Database.get_db)):
-    """
-    Health check avanzado que verifica:
-    - Servidor levantado
-    - Conexión a BD
-    - Base de datos accesible
-    """
     try:
         cur = db.cursor()
         cur.execute("SELECT 1")

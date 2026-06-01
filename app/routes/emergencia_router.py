@@ -1,6 +1,5 @@
 import json
 
-import jwt
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
@@ -11,6 +10,7 @@ import cloudinary.uploader
 from ..classes.postgresql import Database
 from ..services.config import Config
 from ..utils.notificaciones import crear_notificacion
+from ..utils.tenant_deps import get_token_payload
 
 router = APIRouter(prefix="/api/emergencia", tags=["Emergencias"])
 
@@ -73,8 +73,11 @@ async def subir_audio(audio: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/registrar")
-async def registrar_emergencia(data: EmergenciaCreate, db=Depends(Database.get_db)):
+async def registrar_emergencia(data: EmergenciaCreate, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Registra una nueva emergencia vehicular"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != data.usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor()
     try:
         # Verificar que el vehículo pertenece al usuario
@@ -198,15 +201,8 @@ async def analizar_ia(
     Procesa con IA el incidente. El análisis queda vinculado al taller
     que lo solicita — otros talleres no lo ven.
     """
-    # Autenticar y obtener taller_id
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    try:
-        token = authorization.split(" ")[1]
-        payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
-        usuario_id = int(payload.get("sub"))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token inválido")
+    payload = get_token_payload(authorization)
+    usuario_id = int(payload.get("sub"))
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -285,8 +281,11 @@ async def analizar_ia(
 
 
 @router.get("/listar/{usuario_id}")
-async def listar_emergencias(usuario_id: int, db=Depends(Database.get_db)):
+async def listar_emergencias(usuario_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Lista las emergencias de un cliente"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -313,8 +312,9 @@ async def listar_emergencias(usuario_id: int, db=Depends(Database.get_db)):
     finally:
         cur.close()
 @router.get("/detalle/{incidente_id}")
-async def detalle_emergencia(incidente_id: int, db=Depends(Database.get_db)):
+async def detalle_emergencia(incidente_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Obtiene el detalle y estado de una emergencia"""
+    get_token_payload(authorization)  # valida token; talleres y técnicos también necesitan este endpoint
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""

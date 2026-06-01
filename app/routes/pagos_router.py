@@ -1,11 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-import jwt
 from typing import List, Optional
 
-from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 router = APIRouter(prefix="/api/pagos", tags=["Pagos e Ingresos"])
 
@@ -46,37 +45,7 @@ class MessageResponse(BaseModel):
     message: str
 
 
-# ===================== HELPERS =====================
-
-def _get_token(authorization: str) -> dict:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    try:
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(status_code=401, detail="Formato de token inválido")
-    try:
-        return jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-
-def _verify_taller(token_payload: dict, taller_id: int, db):
-    usuario_id = int(token_payload.get("sub"))
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
-        taller = cur.fetchone()
-        if not taller or taller["usuario_id"] != usuario_id:
-            raise HTTPException(status_code=403, detail="No tienes permiso para acceder a este taller")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error verificando acceso: {str(e)}")
-    finally:
-        cur.close()
+# get_token_payload y assert_taller_access vienen de tenant_deps
 
 
 def _row_to_pago(row: dict) -> PagoIngreso:
@@ -110,7 +79,7 @@ async def resumen_ingresos(
     db=Depends(Database.get_db),
 ):
     """Resumen financiero del taller: ingresos, comisiones pagadas y pendientes."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -151,7 +120,7 @@ async def listar_ingresos(
     db=Depends(Database.get_db),
 ):
     """Lista todos los ingresos generados por el taller (servicios completados y cobrados)."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -199,7 +168,7 @@ async def historial_comisiones(
     db=Depends(Database.get_db),
 ):
     """Historial completo de comisiones (pagadas y pendientes) del taller."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -248,7 +217,7 @@ async def pagar_comision(
     db=Depends(Database.get_db),
 ):
     """Marca la comisión del 10% de un pago como pagada a la plataforma."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

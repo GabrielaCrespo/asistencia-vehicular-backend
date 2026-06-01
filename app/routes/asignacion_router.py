@@ -1,13 +1,12 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-import jwt
 import unicodedata
 from typing import List, Optional
 
-from ..services.config import Config
 from ..classes.postgresql import Database
 from ..utils.notificaciones import crear_notificacion
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
 
@@ -64,10 +63,10 @@ class SolicitudAsignadaResponse(BaseModel):
     audio_path: Optional[str]
     prioridad: str
     cliente_nombre: str
-    cliente_telefono: str
-    marca: str
-    modelo: str
-    placa: str
+    cliente_telefono: Optional[str]
+    marca: Optional[str]
+    modelo: Optional[str]
+    placa: Optional[str]
 
 
 class AsignarTecnicoRequest(BaseModel):
@@ -129,38 +128,7 @@ class MessageResponse(BaseModel):
     message: str
 
 
-# ===================== FUNCIONES AUXILIARES =====================
-
-def get_token_from_header(authorization: str = Header(None)) -> dict:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    try:
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(status_code=401, detail="Formato de token inválido")
-    try:
-        payload = jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-
-def verify_taller_access(token_payload: dict, taller_id: int, db) -> bool:
-    usuario_id = int(token_payload.get("sub"))
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
-        taller = cur.fetchone()
-        cur.close()
-        if not taller or taller['usuario_id'] != usuario_id:
-            raise HTTPException(status_code=403, detail="No tienes permiso para acceder a este taller")
-        return True
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(status_code=500, detail=f"Error verificando acceso: {str(e)}")
+# get_token_payload y assert_taller_access vienen de tenant_deps
 
 
 def _row_to_disponible(row: dict) -> SolicitudDisponibleResponse:
@@ -230,7 +198,7 @@ async def listar_solicitudes_disponibles(
     Lista incidentes pendientes filtrando por distancia, disponibilidad
     del taller y match de servicios ofrecidos vs requeridos.
     """
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     usuario_id = int(token_payload.get("sub"))
 
     cur = db.cursor(cursor_factory=RealDictCursor)
@@ -370,7 +338,7 @@ async def detalle_incidente(
     db=Depends(Database.get_db)
 ):
     """Detalle completo de un incidente (cliente, vehículo, evidencias)."""
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -491,8 +459,8 @@ async def listar_asignadas(
     db=Depends(Database.get_db)
 ):
     """Asignaciones activas (aceptada / en_camino / en_servicio) del taller."""
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -510,7 +478,7 @@ async def listar_asignadas(
             FROM ASIGNACION a
             JOIN INCIDENTE i ON a.incidente_id = i.incidente_id
             JOIN USUARIO   u ON i.usuario_id   = u.usuario_id
-            JOIN VEHICULO  v ON i.vehiculo_id  = v.vehiculo_id
+            LEFT JOIN VEHICULO  v ON i.vehiculo_id  = v.vehiculo_id
             LEFT JOIN TECNICO t ON a.tecnico_id = t.tecnico_id
             WHERE a.taller_id = %s
               AND a.estado IN ('aceptada', 'en_camino', 'en_servicio')
@@ -532,8 +500,8 @@ async def historial_asignaciones(
     db=Depends(Database.get_db)
 ):
     """Historial completo de asignaciones del taller."""
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -551,7 +519,7 @@ async def historial_asignaciones(
             FROM ASIGNACION a
             JOIN INCIDENTE i ON a.incidente_id = i.incidente_id
             JOIN USUARIO   u ON i.usuario_id   = u.usuario_id
-            JOIN VEHICULO  v ON i.vehiculo_id  = v.vehiculo_id
+            LEFT JOIN VEHICULO  v ON i.vehiculo_id  = v.vehiculo_id
             LEFT JOIN TECNICO t ON a.tecnico_id = t.tecnico_id
             WHERE a.taller_id = %s
             ORDER BY a.fecha_asignacion DESC
@@ -577,8 +545,8 @@ async def aceptar_solicitud(
     - Crea ASIGNACION con estado='aceptada'.
     - Cambia INCIDENTE.estado a 'asignada'.
     """
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -680,8 +648,8 @@ async def rechazar_solicitud(
     - Registra ASIGNACION con estado='rechazada'.
     - El incidente queda 'pendiente' para que otros talleres puedan aceptarlo.
     """
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -736,8 +704,8 @@ async def asignar_tecnico(
     db=Depends(Database.get_db)
 ):
     """Asigna un técnico disponible del taller a la asignación."""
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -803,8 +771,8 @@ async def actualizar_estado(
     if data.estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Estado inválido. Opciones: {ESTADOS_VALIDOS}")
 
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -891,8 +859,8 @@ async def registrar_diagnostico(
     db=Depends(Database.get_db)
 ):
     """Registra diagnóstico, costo del servicio y cierra la asignación."""
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

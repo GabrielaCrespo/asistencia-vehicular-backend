@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from typing import Optional
 
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload
 
 router = APIRouter(prefix="/api/vehiculo", tags=["Vehículos"])
 
@@ -21,8 +22,11 @@ class VehiculoCreate(BaseModel):
 # ===================== ENDPOINTS =====================
 
 @router.post("/registrar")
-async def registrar_vehiculo(data: VehiculoCreate, db=Depends(Database.get_db)):
+async def registrar_vehiculo(data: VehiculoCreate, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Registra un nuevo vehículo"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != data.usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor()
     try:
         # Verificar placa única
@@ -63,8 +67,11 @@ async def registrar_vehiculo(data: VehiculoCreate, db=Depends(Database.get_db)):
 
 
 @router.get("/listar/{usuario_id}")
-async def listar_vehiculos(usuario_id: int, db=Depends(Database.get_db)):
+async def listar_vehiculos(usuario_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Lista los vehículos de un cliente"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -84,10 +91,18 @@ async def listar_vehiculos(usuario_id: int, db=Depends(Database.get_db)):
 
 
 @router.delete("/eliminar/{vehiculo_id}")
-async def eliminar_vehiculo(vehiculo_id: int, db=Depends(Database.get_db)):
+async def eliminar_vehiculo(vehiculo_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Elimina un vehículo"""
+    payload = get_token_payload(authorization)
     cur = db.cursor()
     try:
+        cur.execute("SELECT usuario_id FROM VEHICULO WHERE vehiculo_id = %s", (vehiculo_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Vehículo no encontrado")
+        if row[0] != int(payload.get("sub", 0)):
+            raise HTTPException(status_code=403, detail="No autorizado")
+
         cur.execute(
             "DELETE FROM VEHICULO WHERE vehiculo_id = %s",
             (vehiculo_id,)

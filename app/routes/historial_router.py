@@ -1,11 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-import jwt
 from typing import List, Optional
 
-from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 router = APIRouter(prefix="/api/historial", tags=["Historial del Taller"])
 
@@ -124,37 +123,7 @@ class DetalleSolicitudResponse(BaseModel):
     comentario_calificacion: Optional[str]
 
 
-# ===================== HELPERS =====================
-
-def _get_token(authorization: str) -> dict:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    try:
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(status_code=401, detail="Formato de token inválido")
-    try:
-        return jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-
-def _verify_taller(token_payload: dict, taller_id: int, db):
-    usuario_id = int(token_payload.get("sub"))
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
-        taller = cur.fetchone()
-        if not taller or taller["usuario_id"] != usuario_id:
-            raise HTTPException(status_code=403, detail="No tienes permiso para acceder a este taller")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error verificando acceso: {str(e)}")
-    finally:
-        cur.close()
+# get_token_payload y assert_taller_access vienen de tenant_deps
 
 
 # ===================== ENDPOINTS =====================
@@ -168,7 +137,7 @@ async def resumen_historial(
     db=Depends(Database.get_db),
 ):
     """Dashboard general del taller: totales de solicitudes, ingresos y calificaciones."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -261,7 +230,7 @@ async def historial_solicitudes(
     db=Depends(Database.get_db),
 ):
     """Historial completo de todas las solicitudes recibidas por el taller."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -366,7 +335,7 @@ async def historial_servicios(
     db=Depends(Database.get_db),
 ):
     """Historial de servicios realizados (asignaciones completadas) con detalle de calificaciones."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -461,7 +430,7 @@ async def historial_transacciones(
     db=Depends(Database.get_db),
 ):
     """Historial de todas las transacciones económicas del taller con filtros."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -542,7 +511,7 @@ async def detalle_solicitud(
     db=Depends(Database.get_db),
 ):
     """Detalle completo de una solicitud: incidente, vehiculo, servicios, pago, IA y calificación."""
-    _verify_taller(_get_token(authorization), taller_id, db)
+    assert_taller_access(get_token_payload(authorization), taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

@@ -1,6 +1,7 @@
 import os
 import jwt
 import uvicorn
+import json
 from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -92,6 +93,15 @@ async def websocket_endpoint(
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_json({"tipo": "pong"})
+            else:
+                try:
+                    import json
+                    msg = json.loads(data)
+                    if msg.get("tipo") == "ubicacion_tecnico":
+                        db = next(Database.get_db())
+                        await manager.forward_to_incident_client(usuario_id, msg, db)
+                except Exception:
+                    pass
     except WebSocketDisconnect:
         manager.disconnect(websocket, usuario_id)
 

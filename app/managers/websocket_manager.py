@@ -6,7 +6,6 @@ from ..services.config import Config
 
 class ConnectionManager:
     def __init__(self):
-        # usuario_id -> set de websockets activos
         self.active: Dict[int, Set[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, usuario_id: int):
@@ -39,6 +38,27 @@ class ConnectionManager:
         """Envía un mensaje a todos los usuarios conectados."""
         for usuario_id in list(self.active.keys()):
             await self.send_to_user(usuario_id, data)
+
+    async def forward_to_incident_client(self, tecnico_usuario_id: int, data: dict, db):
+        """Reenvía la ubicación del técnico al cliente del incidente."""
+        try:
+            incidente_id = data.get("incidente_id")
+            if not incidente_id:
+                return
+            from psycopg2.extras import RealDictCursor
+            cur = db.cursor(cursor_factory=RealDictCursor)
+            cur.execute("""
+                SELECT i.usuario_id FROM INCIDENTE i
+                JOIN ASIGNACION a ON a.incidente_id = i.incidente_id
+                JOIN TECNICO t ON a.tecnico_id = t.tecnico_id
+                WHERE i.incidente_id = %s AND t.usuario_id = %s
+            """, (incidente_id, tecnico_usuario_id))
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                await self.send_to_user(row["usuario_id"], data)
+        except Exception as e:
+            print(f"[WS] Error reenviando ubicación: {e}")
 
 
 # Instancia global — se importa desde cualquier router

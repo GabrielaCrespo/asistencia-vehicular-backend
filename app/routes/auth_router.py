@@ -8,6 +8,7 @@ import jwt
 
 from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 # Router para autenticación de talleres
 router = APIRouter(prefix="/api/taller", tags=["Taller Authentication"])
@@ -36,6 +37,8 @@ class TallerRegister(BaseModel):
     telefono_operativo: str
     horario_inicio: str
     horario_fin: str
+    # Si se omite, el taller se asigna a la organización principal por defecto
+    organizacion_id: Optional[int] = None
 
 class LoginRequest(BaseModel):
     """Modelo para login de taller"""
@@ -61,6 +64,7 @@ class TallerUserResponse(BaseModel):
     telefono: Optional[str] = None
     documento_identidad: str
     rol_id: int
+    rol: Optional[str] = None
     estado: str
     taller_id: int
     razon_social: str
@@ -68,6 +72,7 @@ class TallerUserResponse(BaseModel):
     telefono_operativo: Optional[str] = None
     horario_inicio: Optional[str] = None
     horario_fin: Optional[str] = None
+    organizacion_id: Optional[int] = None
 
 class LoginResponse(BaseModel):
     """Respuesta del endpoint login"""
@@ -108,28 +113,50 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
                 detail="El correo ya está registrado."
             )
 
+        # Resolver organizacion_id: usar la proporcionada o la organización principal
+        if data.organizacion_id:
+            cur.execute(
+                "SELECT organizacion_id FROM organizacion WHERE organizacion_id = %s AND estado = 'activo'",
+                (data.organizacion_id,)
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Organización no encontrada o inactiva")
+            org_id = data.organizacion_id
+        else:
+            cur.execute(
+                "SELECT organizacion_id FROM organizacion WHERE nombre = 'Organización Principal' LIMIT 1"
+            )
+            org_row = cur.fetchone()
+            if not org_row:
+                raise HTTPException(status_code=500, detail="Organización principal no encontrada. Ejecuta el script de migración.")
+            org_id = org_row[0]
+
         # Hash de contraseña
         password_hash = hash_password(data.password)
 
-        # 1. Insertar Usuario (rol_id=2 es TALLER)
+        # 1. Insertar Usuario (rol_id=2 es TALLER) con organizacion_id
         cur.execute("""
-            INSERT INTO USUARIO (rol_id, nombre, email, telefono, contrasena_hash, documento_identidad, estado)
-            VALUES (2, %s, %s, %s, %s, %s, 'activo')
+            INSERT INTO USUARIO (rol_id, nombre, email, telefono, contrasena_hash,
+                                 documento_identidad, estado, organizacion_id)
+            VALUES (2, %s, %s, %s, %s, %s, 'activo', %s)
             RETURNING usuario_id
         """, (
             data.nombre_contacto.upper(),
             data.email.lower(),
             data.telefono,
             password_hash,
-            data.documento_identidad
+            data.documento_identidad,
+            org_id,
         ))
-        
+
         nuevo_usuario_id = cur.fetchone()[0]
 
-        # 2. Insertar Taller
+        # 2. Insertar Taller con organizacion_id
         cur.execute("""
-            INSERT INTO TALLER (usuario_id, razon_social, direccion, latitud, longitud, telefono_operativo, horario_inicio, horario_fin, disponible)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            INSERT INTO TALLER (usuario_id, razon_social, direccion, latitud, longitud,
+                                telefono_operativo, horario_inicio, horario_fin,
+                                disponible, organizacion_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
             RETURNING taller_id
         """, (
             nuevo_usuario_id,
@@ -139,7 +166,8 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
             data.longitud,
             data.telefono_operativo,
             data.horario_inicio,
-            data.horario_fin
+            data.horario_fin,
+            org_id,
         ))
         nuevo_taller_id = cur.fetchone()[0]
 
@@ -184,7 +212,7 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
     """
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Query que obtiene usuario y taller
+        # Query que obtiene usuario, taller y organización
         query = """
             SELECT
                 u.usuario_id,
@@ -195,14 +223,17 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
                 u.estado,
                 u.documento_identidad,
                 u.rol_id,
+                r.nombre AS rol_nombre,
                 t.taller_id,
                 t.razon_social,
                 t.direccion,
                 t.telefono_operativo,
+                t.organizacion_id,
                 TO_CHAR(t.horario_inicio, 'HH24:MI') AS horario_inicio,
                 TO_CHAR(t.horario_fin, 'HH24:MI') AS horario_fin
             FROM USUARIO u
             INNER JOIN TALLER t ON u.usuario_id = t.usuario_id
+            INNER JOIN ROL r ON u.rol_id = r.rol_id
             WHERE u.email = %s AND u.rol_id = 2
             LIMIT 1
         """
@@ -222,12 +253,14 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
                 detail="Credenciales inválidas"
             )
 
-        # Generar JWT token
+        # Generar JWT token con contexto multi-tenant completo
         token_payload = {
             "sub": str(user['usuario_id']),
             "taller_id": user['taller_id'],
+            "organizacion_id": user['organizacion_id'],
+            "rol": user['rol_nombre'],
             "email": user['email'],
-            "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24)
+            "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24),
         }
         token = jwt.encode(
             token_payload,
@@ -243,6 +276,7 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
             telefono=user['telefono'],
             documento_identidad=user['documento_identidad'],
             rol_id=user['rol_id'],
+            rol=user['rol_nombre'],
             estado=user['estado'],
             taller_id=user['taller_id'],
             razon_social=user['razon_social'],
@@ -250,6 +284,7 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
             telefono_operativo=user['telefono_operativo'],
             horario_inicio=user['horario_inicio'],
             horario_fin=user['horario_fin'],
+            organizacion_id=user['organizacion_id'],
         )
 
         return LoginResponse(
@@ -305,36 +340,19 @@ class TallerProfileUpdate(BaseModel):
     horario_fin: Optional[str] = None
 
 
-def _verify_token(authorization: str = Header(None)) -> dict:
-    """Extrae y valida el JWT del header Authorization"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    try:
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(status_code=401, detail="Formato de token inválido")
-    try:
-        return jwt.decode(token, Config.SECRET_KEY, algorithms=[Config.ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-
 # ===================== ENDPOINTS PERFIL =====================
 
 @router.get("/profile/{taller_id}", response_model=TallerProfileResponse)
 async def get_taller_profile(
     taller_id: int,
-    payload: dict = Depends(_verify_token),
+    payload: dict = Depends(get_token_payload),
     db=Depends(Database.get_db)
 ):
     """
     Obtiene el perfil completo del taller (datos de usuario + taller).
-    Solo el propio taller puede consultar su perfil.
+    Solo el propio taller (o tenant_admin de la misma org) puede consultar su perfil.
     """
-    if payload.get("taller_id") != taller_id:
-        raise HTTPException(status_code=403, detail="Acceso denegado")
+    assert_taller_access(payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -379,18 +397,16 @@ async def get_taller_profile(
 async def update_taller_profile(
     taller_id: int,
     data: TallerProfileUpdate,
-    payload: dict = Depends(_verify_token),
+    payload: dict = Depends(get_token_payload),
     db=Depends(Database.get_db)
 ):
     """
     Actualiza el perfil del taller.
-    Solo el propio taller puede editar su perfil.
+    Solo el propio taller (o tenant_admin de la misma org) puede editar su perfil.
     OPTIMIZACIÓN: Retorna respuesta sin query adicional.
     """
     print(f"[UPDATE TALLER] 📝 Recibida solicitud para taller_id={taller_id}")
-    
-    if payload.get("taller_id") != taller_id:
-        raise HTTPException(status_code=403, detail="Acceso denegado")
+    assert_taller_access(payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

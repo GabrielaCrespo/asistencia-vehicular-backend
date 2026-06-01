@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta, timezone
@@ -7,6 +7,7 @@ import bcrypt
 
 from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload
 
 router = APIRouter(prefix="/api/cliente", tags=["Cliente Authentication"])
 
@@ -186,14 +187,17 @@ class ClienteUpdate(BaseModel):
     documento_identidad: str
 
 @router.get("/profile/{usuario_id}")
-async def get_perfil_cliente(usuario_id: int, db=Depends(Database.get_db)):
+async def get_perfil_cliente(usuario_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Obtiene el perfil del cliente"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
-            SELECT usuario_id, nombre, email, telefono, 
+            SELECT usuario_id, nombre, email, telefono,
                    documento_identidad, estado, fecha_registro
-            FROM USUARIO 
+            FROM USUARIO
             WHERE usuario_id = %s AND rol_id = 1
         """, (usuario_id,))
         
@@ -211,8 +215,11 @@ async def get_perfil_cliente(usuario_id: int, db=Depends(Database.get_db)):
 
 
 @router.put("/profile/{usuario_id}")
-async def update_perfil_cliente(usuario_id: int, data: ClienteUpdate, db=Depends(Database.get_db)):
+async def update_perfil_cliente(usuario_id: int, data: ClienteUpdate, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Actualiza el perfil del cliente"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("sub", 0)) != usuario_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor()
     try:
         cur.execute("""

@@ -8,14 +8,12 @@ Cada taller solo puede ver y modificar sus propios técnicos
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-import jwt
 from typing import List, Optional
-from datetime import datetime
 from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 router = APIRouter(prefix="/api/tecnicos", tags=["Técnicos"])
 
@@ -71,77 +69,9 @@ class MessageResponse(BaseModel):
     message: str
 
 
-# ===================== FUNCIONES AUXILIARES =====================
-
-def get_token_from_header(authorization: str = Header(None)) -> dict:
-    """
-    Extrae y decodifica el JWT del header
-    Retorna el payload del token
-    Lanza excepción si no es válido
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=401,
-            detail="Token no proporcionado"
-        )
-    
-    try:
-        # El header viene como "Bearer <token>"
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(
-            status_code=401,
-            detail="Formato de token inválido"
-        )
-    
-    try:
-        payload = jwt.decode(
-            token,
-            Config.SECRET_KEY,
-            algorithms=[Config.ALGORITHM]
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token expirado"
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido"
-        )
-
-
-def verify_taller_access(token_payload: dict, taller_id: int, db) -> bool:
-    """
-    Verifica que el usuario del token es propietario del taller
-    Retorna True si tiene acceso, lanza excepción si no
-    """
-    usuario_id = int(token_payload.get("sub"))
-    
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        cur.execute(
-            "SELECT usuario_id FROM TALLER WHERE taller_id = %s",
-            (taller_id,)
-        )
-        taller = cur.fetchone()
-        cur.close()
-        
-        if not taller or taller['usuario_id'] != usuario_id:
-            raise HTTPException(
-                status_code=403,
-                detail="No tienes permiso para acceder a este taller"
-            )
-        return True
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error verificando acceso: {str(e)}"
-        )
+# get_token_payload y assert_taller_access vienen de tenant_deps
+# - get_token_payload: decodifica JWT (cualquier rol)
+# - assert_taller_access: permite taller (propio), tenant_admin (mismo org) y administrador
 
 
 # ===================== ENDPOINTS =====================
@@ -157,11 +87,8 @@ async def crear_tecnico(
     Crea un nuevo técnico para el taller
     Solo el propietario del taller puede crear técnicos
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -261,11 +188,8 @@ async def listar_tecnicos(
     Lista todos los técnicos del taller
     Solo el propietario del taller puede ver sus técnicos
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -321,11 +245,8 @@ async def obtener_tecnico(
     """
     Obtiene los detalles de un técnico específico
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -380,11 +301,8 @@ async def actualizar_tecnico(
     """
     Actualiza los datos de un técnico
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -479,11 +397,8 @@ async def eliminar_tecnico(
     Elimina un técnico del taller
     Solo se puede eliminar si no tiene asignaciones activas
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -558,11 +473,8 @@ async def actualizar_ubicacion_tecnico(
     Actualiza la ubicación actual del técnico
     Útil para tracking en tiempo real
     """
-    # Validar token
-    token_payload = get_token_from_header(authorization)
-    
-    # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

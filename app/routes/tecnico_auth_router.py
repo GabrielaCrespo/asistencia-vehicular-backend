@@ -1,12 +1,13 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import jwt
 from typing import Optional
 from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload
 
 router = APIRouter(prefix="/api/tecnico", tags=["Técnico Auth"])
 
@@ -65,7 +66,8 @@ async def login_tecnico(data: TecnicoLogin, db=Depends(Database.get_db)):
             "sub": str(tecnico['usuario_id']),
             "tecnico_id": tecnico['tecnico_id'],
             "taller_id": tecnico['taller_id'],
-            "exp": datetime.utcnow() + timedelta(hours=24)
+            "rol": "tecnico",
+            "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24)
         }
         token = jwt.encode(token_payload, Config.SECRET_KEY, algorithm=Config.ALGORITHM)
 
@@ -86,8 +88,11 @@ async def login_tecnico(data: TecnicoLogin, db=Depends(Database.get_db)):
         cur.close()
 
 @router.get("/asignacion/{tecnico_id}")
-async def get_asignacion_tecnico(tecnico_id: int, db=Depends(Database.get_db)):
+async def get_asignacion_tecnico(tecnico_id: int, authorization: str = Header(None), db=Depends(Database.get_db)):
     """Obtiene la asignación activa del técnico"""
+    payload = get_token_payload(authorization)
+    if int(payload.get("tecnico_id", -1)) != tecnico_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("""
@@ -137,11 +142,13 @@ class TecnicoDiagnosticoRequest(BaseModel):
 async def actualizar_estado_tecnico(
     asignacion_id: int,
     data: ActualizarEstadoRequest,
+    authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
+    payload = get_token_payload(authorization)
     ESTADOS_VALIDOS = ('en_camino', 'en_servicio', 'completada')
     if data.estado not in ESTADOS_VALIDOS:
-        raise HTTPException(status_code=400, detail=f"Estado inválido.")
+        raise HTTPException(status_code=400, detail="Estado inválido.")
 
     cur = db.cursor()
     try:
@@ -152,6 +159,8 @@ async def actualizar_estado_tecnico(
         asignacion = cur.fetchone()
         if not asignacion:
             raise HTTPException(status_code=404, detail="Asignación no encontrada")
+        if int(payload.get("tecnico_id", -1)) != asignacion[2]:
+            raise HTTPException(status_code=403, detail="No autorizado")
 
         # Actualizar estado de la asignación
         cur.execute(
@@ -197,9 +206,11 @@ async def actualizar_estado_tecnico(
 async def finalizar_servicio_tecnico(
     asignacion_id: int,
     data: TecnicoDiagnosticoRequest,
+    authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
     """Finaliza el servicio y registra el pago desde el técnico"""
+    payload = get_token_payload(authorization)
     cur = db.cursor()
     try:
         cur.execute(
@@ -209,6 +220,8 @@ async def finalizar_servicio_tecnico(
         asignacion = cur.fetchone()
         if not asignacion:
             raise HTTPException(status_code=404, detail="Asignación no encontrada")
+        if int(payload.get("tecnico_id", -1)) != asignacion[2]:
+            raise HTTPException(status_code=403, detail="No autorizado")
 
         comision = round(data.costo * 0.10, 2)
         monto_taller = round(data.costo * 0.90, 2)

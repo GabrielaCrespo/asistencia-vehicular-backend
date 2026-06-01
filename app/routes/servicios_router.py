@@ -10,13 +10,11 @@ con precios personalizados
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
-import jwt
 import unicodedata
 from typing import List, Optional
-from datetime import datetime
 
-from ..services.config import Config
 from ..classes.postgresql import Database
+from ..utils.tenant_deps import get_token_payload, assert_taller_access
 
 router = APIRouter(prefix="/api/servicios", tags=["Servicios"])
 
@@ -112,77 +110,7 @@ class MessageResponse(BaseModel):
     message: str
 
 
-# ===================== FUNCIONES AUXILIARES =====================
-
-def get_token_from_header(authorization: str = Header(None)) -> dict:
-    """
-    Extrae y decodifica el JWT del header
-    Retorna el payload del token
-    Lanza excepción si no es válido
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=401,
-            detail="Token no proporcionado"
-        )
-    
-    try:
-        # El header viene como "Bearer <token>"
-        token = authorization.split(" ")[1]
-    except IndexError:
-        raise HTTPException(
-            status_code=401,
-            detail="Formato de token inválido"
-        )
-    
-    try:
-        payload = jwt.decode(
-            token,
-            Config.SECRET_KEY,
-            algorithms=[Config.ALGORITHM]
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token expirado"
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido"
-        )
-
-
-def verify_taller_access(token_payload: dict, taller_id: int, db) -> bool:
-    """
-    Verifica que el usuario del token es propietario del taller
-    Retorna True si tiene acceso, lanza excepción si no
-    """
-    usuario_id = int(token_payload.get("sub"))
-    
-    cur = db.cursor(cursor_factory=RealDictCursor)
-    try:
-        cur.execute(
-            "SELECT usuario_id FROM TALLER WHERE taller_id = %s",
-            (taller_id,)
-        )
-        taller = cur.fetchone()
-        cur.close()
-        
-        if not taller or taller['usuario_id'] != usuario_id:
-            raise HTTPException(
-                status_code=403,
-                detail="No tienes permiso para acceder a este taller"
-            )
-        return True
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error verificando acceso: {str(e)}"
-        )
+# get_token_payload y assert_taller_access vienen de tenant_deps
 
 
 # ===================== ENDPOINTS - CATÁLOGO GLOBAL =====================
@@ -197,7 +125,7 @@ async def listar_catalogo_servicios(
     Útil para agregar servicios a un taller
     """
     # Solo validar que hay token (cualquier usuario autenticado puede ver)
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -217,7 +145,7 @@ async def listar_catalogo_servicios(
                 nombre=s['nombre'],
                 descripcion=s['descripcion'],
                 categoria=s['categoria'],
-                precio_base=float(s['precio_base']),
+                precio_base=float(s['precio_base']) if s['precio_base'] is not None else None,
                 creado_en=str(s['creado_en'])
             )
             for s in servicios
@@ -250,7 +178,7 @@ async def crear_servicio_catalogo(
     Crea un nuevo servicio en el catálogo global
     Cualquier usuario autenticado puede crear servicios en el catálogo
     """
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -284,7 +212,7 @@ async def crear_servicio_catalogo(
             nombre=servicio['nombre'],
             descripcion=servicio['descripcion'],
             categoria=servicio['categoria'],
-            precio_base=float(servicio['precio_base']),
+            precio_base=float(servicio['precio_base']) if servicio['precio_base'] is not None else None,
             creado_en=str(servicio['creado_en'])
         )
 
@@ -320,8 +248,8 @@ async def crear_servicio_directo_en_taller(
 
     El taller nunca necesita conocer el catálogo global ni hacer doble paso.
     """
-    token_payload = get_token_from_header(authorization)
-    verify_taller_access(token_payload, taller_id, db)
+    token_payload = get_token_payload(authorization)
+    assert_taller_access(token_payload, taller_id, db)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -415,10 +343,10 @@ async def agregar_servicio_a_taller(
     Permite customizar el precio
     """
     # Validar token
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -484,7 +412,7 @@ async def agregar_servicio_a_taller(
             nombre_servicio=servicio['nombre'],
             descripcion=servicio['descripcion'],
             categoria=servicio['categoria'],
-            precio_base=float(servicio['precio_base']),
+            precio_base=float(servicio['precio_base']) if servicio['precio_base'] is not None else None,
             precio_personalizado=float(data.precio_personalizado) if data.precio_personalizado else None,
             disponible=data.disponible,
             creado_en=str(result['creado_en'])
@@ -513,10 +441,10 @@ async def listar_servicios_taller(
     Lista todos los servicios que ofrece un taller
     """
     # Validar token
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -548,7 +476,7 @@ async def listar_servicios_taller(
                 nombre_servicio=s['nombre'],
                 descripcion=s['descripcion'],
                 categoria=s['categoria'],
-                precio_base=float(s['precio_base']),
+                precio_base=float(s['precio_base']) if s['precio_base'] is not None else None,
                 precio_personalizado=float(s['precio_personalizado']) if s['precio_personalizado'] else None,
                 disponible=s['disponible'],
                 creado_en=str(s['creado_en'])
@@ -582,10 +510,10 @@ async def obtener_servicio_taller(
     Obtiene los detalles de un servicio específico del taller
     """
     # Validar token
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -621,7 +549,7 @@ async def obtener_servicio_taller(
             nombre_servicio=servicio['nombre'],
             descripcion=servicio['descripcion'],
             categoria=servicio['categoria'],
-            precio_base=float(servicio['precio_base']),
+            precio_base=float(servicio['precio_base']) if servicio['precio_base'] is not None else None,
             precio_personalizado=float(servicio['precio_personalizado']) if servicio['precio_personalizado'] else None,
             disponible=servicio['disponible'],
             creado_en=str(servicio['creado_en'])
@@ -650,10 +578,10 @@ async def actualizar_servicio_taller(
     Actualiza precio_personalizado o disponibilidad de servicio en taller
     """
     # Validar token
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
@@ -741,7 +669,7 @@ async def actualizar_servicio_taller(
             nombre_servicio=servicio['nombre'],
             descripcion=servicio['descripcion'],
             categoria=servicio['categoria'],
-            precio_base=float(servicio['precio_base']),
+            precio_base=float(servicio['precio_base']) if servicio['precio_base'] is not None else None,
             precio_personalizado=float(servicio['precio_personalizado']) if servicio['precio_personalizado'] else None,
             disponible=servicio['disponible'],
             creado_en=str(servicio['creado_en'])
@@ -771,10 +699,10 @@ async def remover_servicio_taller(
     Elimina un servicio de los ofrecidos por el taller
     """
     # Validar token
-    token_payload = get_token_from_header(authorization)
+    token_payload = get_token_payload(authorization)
     
     # Verificar acceso al taller
-    verify_taller_access(token_payload, taller_id, db)
+    assert_taller_access(token_payload, taller_id, db)
     
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:

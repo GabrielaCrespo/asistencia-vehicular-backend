@@ -17,7 +17,7 @@ _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None or _pool.closed:
-        logger.info("Inicializando pool de conexiones a BD...")
+        logger.info(f"Conectando a BD: host={Config.DB_HOST} db={Config.DB_NAME} user={Config.DB_USER}")
         _pool = psycopg2.pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,

@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
+import asyncio
 import unicodedata
 from typing import List, Optional
 
 from ..classes.postgresql import Database
 from ..utils.notificaciones import crear_notificacion
 from ..utils.tenant_deps import get_token_payload, assert_taller_access
+from ..managers.websocket_manager import manager
 
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
 
@@ -203,7 +205,6 @@ async def listar_solicitudes_disponibles(
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # 1. Obtener datos del taller solicitante
         cur.execute("""
             SELECT taller_id, latitud, longitud, disponible
             FROM TALLER WHERE usuario_id = %s
@@ -214,20 +215,18 @@ async def listar_solicitudes_disponibles(
         if not taller['disponible']:
             return []
 
-        # 1b. Verificar horario operativo si el taller lo tiene configurado.
-        # Si horario_inicio = horario_fin (ej: 00:00 - 00:00) se interpreta como 24 horas.
         cur.execute("""
             SELECT
                 horario_inicio IS NOT NULL AND horario_fin IS NOT NULL AS tiene_horario,
                 (horario_inicio = horario_fin)
-                OR (CURRENT_TIME BETWEEN horario_inicio AND horario_fin) AS en_horario
+                OR ((CURRENT_TIMESTAMP AT TIME ZONE 'America/La_Paz')::TIME
+                    BETWEEN horario_inicio AND horario_fin) AS en_horario
             FROM TALLER WHERE taller_id = %s
         """, (taller['taller_id'],))
         horario_row = cur.fetchone()
         if horario_row and horario_row['tiene_horario'] and not horario_row['en_horario']:
             return []
 
-        # 2. Categorías de servicios que ofrece el taller (normalizadas a mayúsculas)
         cur.execute("""
             SELECT DISTINCT UPPER(TRIM(s.categoria)) AS categoria
             FROM TALLER_SERVICIO ts
@@ -242,7 +241,6 @@ async def listar_solicitudes_disponibles(
 
         t_lat = float(taller['latitud']) if taller['latitud'] is not None else None
         t_lng = float(taller['longitud']) if taller['longitud'] is not None else None
-        # Coordenadas (0,0) significan que el taller no tiene ubicación configurada
         has_loc = (t_lat is not None and t_lng is not None
                    and not (t_lat == 0.0 and t_lng == 0.0))
 
@@ -274,19 +272,12 @@ async def listar_solicitudes_disponibles(
                   AND rej.estado = 'rechazada'
               )
         """
-        # Los %s se sustituyen en orden de aparición en el SQL:
-        # 1) haversine en SELECT (3 params, solo si has_loc)
-        # 2) rej.taller_id en NOT EXISTS (1 param)
-        # 3) categorías en IN (n params)
         params: list = []
         if has_loc:
-            params += [t_lat, t_lng, t_lat]   # para dist_select en SELECT
+            params += [t_lat, t_lng, t_lat]
 
-        params += [taller['taller_id']]        # para NOT EXISTS en WHERE
+        params += [taller['taller_id']]
 
-        # Filtro de compatibilidad directo sobre tipo_problema del incidente.
-        # Usa el mismo mapeo que emergencia_router para ser consistente.
-        # Si el incidente no tiene tipo_problema → visible para cualquier taller.
         TIPO_MAP = {
             'batería': 'ELECTRICO', 'bateria': 'ELECTRICO',
             'llanta':  'AUXILIO',
@@ -342,8 +333,6 @@ async def detalle_incidente(
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Datos del incidente + cliente + vehículo
-        # Usamos LEFT JOIN en VEHICULO por si vehiculo_id es NULL
         cur.execute("""
             SELECT
                 i.incidente_id, i.descripcion,
@@ -367,20 +356,15 @@ async def detalle_incidente(
 
         r = dict(row)
 
-        # tipo_problema: intentar leerlo si la columna ya existe en la BD
         tipo_problema = None
         try:
-            cur.execute(
-                "SELECT tipo_problema FROM INCIDENTE WHERE incidente_id = %s",
-                (incidente_id,)
-            )
+            cur.execute("SELECT tipo_problema FROM INCIDENTE WHERE incidente_id = %s", (incidente_id,))
             tp_row = cur.fetchone()
             if tp_row:
                 tipo_problema = tp_row.get('tipo_problema')
         except Exception:
-            db.rollback()  # limpiar estado de error en la conexión
+            db.rollback()
 
-        # Resolver taller_id del usuario autenticado
         taller_id_viewer = None
         try:
             usuario_id_viewer = int(token_payload.get("sub"))
@@ -391,7 +375,6 @@ async def detalle_incidente(
         except Exception:
             db.rollback()
 
-        # Análisis IA del taller autenticado para este incidente
         ia_row = None
         try:
             if taller_id_viewer:
@@ -550,7 +533,6 @@ async def aceptar_solicitud(
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar que el incidente existe y sigue pendiente
         cur.execute(
             "SELECT incidente_id, estado FROM INCIDENTE WHERE incidente_id = %s",
             (data.incidente_id,)
@@ -564,7 +546,6 @@ async def aceptar_solicitud(
                 detail=f"El incidente ya no está disponible (estado: {incidente['estado']})"
             )
 
-        # Verificar que no haya asignación activa de este taller para este incidente
         cur.execute("""
             SELECT asignacion_id FROM ASIGNACION
             WHERE incidente_id = %s AND taller_id = %s
@@ -573,7 +554,6 @@ async def aceptar_solicitud(
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="Ya tienes este incidente asignado")
 
-        # Crear la asignación
         cur.execute("""
             INSERT INTO ASIGNACION (
                 incidente_id, taller_id, tecnico_id, estado,
@@ -581,31 +561,25 @@ async def aceptar_solicitud(
             )
             VALUES (%s, %s, %s, 'aceptada', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             RETURNING asignacion_id
-        """, (
-            data.incidente_id,
-            taller_id,
-            data.tecnico_id,
-            data.tiempo_estimado_minutos,
-        ))
+        """, (data.incidente_id, taller_id, data.tecnico_id, data.tiempo_estimado_minutos))
         asignacion_id = cur.fetchone()['asignacion_id']
 
-        # Actualizar estado del incidente
         cur.execute("""
             UPDATE INCIDENTE
             SET estado = 'asignada', fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE incidente_id = %s
         """, (data.incidente_id,))
 
-        # Marcar técnico como no disponible si fue asignado al aceptar
         if data.tecnico_id:
             cur.execute(
                 "UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s AND taller_id = %s",
                 (data.tecnico_id, taller_id)
             )
 
-        # Notificar al cliente que su solicitud fue aceptada
         cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
         inc_row = cur.fetchone()
+        cliente_uid = None
+        razon = "Un taller"
         if inc_row:
             cliente_uid = inc_row["usuario_id"]
             cur.execute("SELECT razon_social FROM TALLER WHERE taller_id = %s", (taller_id,))
@@ -620,6 +594,17 @@ async def aceptar_solicitud(
             )
 
         db.commit()
+
+        if cliente_uid:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": "solicitud_aceptada",
+                "titulo": "¡Tu solicitud fue aceptada!",
+                "mensaje": f"{razon} aceptó tu solicitud de asistencia.",
+                "incidente_id": data.incidente_id,
+                "asignacion_id": asignacion_id,
+                "taller_id": taller_id
+            }))
+
         return AsignacionResponse(
             success=True,
             message="Solicitud aceptada correctamente",
@@ -653,7 +638,6 @@ async def rechazar_solicitud(
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
-        # Verificar que el incidente existe
         cur.execute(
             "SELECT incidente_id, estado FROM INCIDENTE WHERE incidente_id = %s",
             (data.incidente_id,)
@@ -662,7 +646,6 @@ async def rechazar_solicitud(
         if not incidente:
             raise HTTPException(status_code=404, detail="Incidente no encontrado")
 
-        # Registrar rechazo (sin cambiar el estado del incidente)
         cur.execute("""
             INSERT INTO ASIGNACION (
                 incidente_id, taller_id, estado, observaciones, fecha_asignacion
@@ -670,7 +653,6 @@ async def rechazar_solicitud(
             VALUES (%s, %s, 'rechazada', %s, CURRENT_TIMESTAMP)
         """, (data.incidente_id, taller_id, data.observaciones))
 
-        # Notificar al cliente que este taller no pudo atender
         cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (data.incidente_id,))
         inc_row = cur.fetchone()
         if inc_row:
@@ -683,6 +665,15 @@ async def rechazar_solicitud(
             )
 
         db.commit()
+
+        if inc_row:
+            asyncio.create_task(manager.send_to_user(inc_row["usuario_id"], {
+                "tipo": "solicitud_rechazada",
+                "titulo": "Taller no disponible",
+                "mensaje": "Un taller no pudo atender tu solicitud. Seguimos buscando.",
+                "incidente_id": data.incidente_id
+            }))
+
         return MessageResponse(success=True, message="Solicitud rechazada")
 
     except HTTPException:
@@ -726,24 +717,15 @@ async def asignar_tecnico(
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Técnico no encontrado o no disponible")
 
-        # Liberar técnico anterior si era distinto
         prev_tecnico_id = asignacion.get('tecnico_id')
         if prev_tecnico_id and prev_tecnico_id != data.tecnico_id:
-            cur.execute(
-                "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                (prev_tecnico_id,)
-            )
+            cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (prev_tecnico_id,))
 
         cur.execute(
             "UPDATE ASIGNACION SET tecnico_id = %s WHERE asignacion_id = %s",
             (data.tecnico_id, asignacion_id)
         )
-
-        # Marcar al nuevo técnico como no disponible
-        cur.execute(
-            "UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s",
-            (data.tecnico_id,)
-        )
+        cur.execute("UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s", (data.tecnico_id,))
 
         db.commit()
         return MessageResponse(success=True, message="Técnico asignado correctamente")
@@ -766,7 +748,6 @@ async def actualizar_estado(
     authorization: str = Header(None),
     db=Depends(Database.get_db)
 ):
-    """Actualiza el estado del servicio: en_camino → en_servicio → completada."""
     ESTADOS_VALIDOS = ('en_camino', 'en_servicio', 'completada')
     if data.estado not in ESTADOS_VALIDOS:
         raise HTTPException(status_code=400, detail=f"Estado inválido. Opciones: {ESTADOS_VALIDOS}")
@@ -791,42 +772,36 @@ async def actualizar_estado(
             (data.estado, asignacion_id)
         )
 
-        # Si se completa: cerrar incidente y liberar técnico
         if data.estado == 'completada':
             cur.execute(
                 "UPDATE INCIDENTE SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP WHERE incidente_id = %s",
                 (asignacion['incidente_id'],)
             )
             if asignacion.get('tecnico_id'):
-                cur.execute(
-                    "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                    (asignacion['tecnico_id'],)
-                )
+                cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (asignacion['tecnico_id'],))
 
-        # Notificaciones según el nuevo estado
         ESTADO_MSGS = {
             'en_camino':   ("El técnico está en camino", "Tu técnico ya está en camino a tu ubicación."),
             'en_servicio': ("El técnico llegó", "El técnico llegó a tu ubicación e inició el servicio."),
             'completada':  ("Servicio completado", "El servicio ha finalizado. Puedes calificar la atención."),
         }
+
+        cliente_uid = None
+        titulo_c = desc_c = None
         if data.estado in ESTADO_MSGS:
             titulo_c, desc_c = ESTADO_MSGS[data.estado]
-            cur.execute(
-                "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
-                (asignacion['incidente_id'],),
-            )
+            cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (asignacion['incidente_id'],))
             inc_row = cur.fetchone()
             if inc_row:
+                cliente_uid = inc_row["usuario_id"]
                 crear_notificacion(
-                    db, inc_row["usuario_id"],
+                    db, cliente_uid,
                     f"estado_{data.estado}",
                     titulo_c, desc_c,
                     {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
                 )
             if data.estado == 'completada':
-                cur.execute(
-                    "SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,)
-                )
+                cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
                 taller_row = cur.fetchone()
                 if taller_row:
                     crear_notificacion(
@@ -838,6 +813,17 @@ async def actualizar_estado(
                     )
 
         db.commit()
+
+        if cliente_uid and titulo_c:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": f"estado_{data.estado}",
+                "titulo": titulo_c,
+                "mensaje": desc_c,
+                "incidente_id": asignacion['incidente_id'],
+                "asignacion_id": asignacion_id,
+                "estado": data.estado
+            }))
+
         return MessageResponse(success=True, message=f"Estado actualizado a '{data.estado}'")
 
     except HTTPException:
@@ -875,28 +861,19 @@ async def registrar_diagnostico(
         comision = round(data.costo * 0.10, 2)
         monto_taller = round(data.costo * 0.90, 2)
 
-        # Actualizar observaciones y marcar completada
         cur.execute("""
-            UPDATE ASIGNACION
-            SET observaciones = %s, estado = 'completada'
+            UPDATE ASIGNACION SET observaciones = %s, estado = 'completada'
             WHERE asignacion_id = %s
         """, (data.observaciones, asignacion_id))
 
-        # Cerrar el incidente
         cur.execute("""
-            UPDATE INCIDENTE
-            SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP
+            UPDATE INCIDENTE SET estado = 'cerrada', fecha_actualizacion = CURRENT_TIMESTAMP
             WHERE incidente_id = %s
         """, (asignacion['incidente_id'],))
 
-        # Liberar técnico asignado
         if asignacion.get('tecnico_id'):
-            cur.execute(
-                "UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s",
-                (asignacion['tecnico_id'],)
-            )
+            cur.execute("UPDATE TECNICO SET disponible = TRUE WHERE tecnico_id = %s", (asignacion['tecnico_id'],))
 
-        # Registrar pago (INSERT OR UPDATE si ya existe)
         cur.execute("""
             INSERT INTO PAGO (
                 incidente_id, asignacion_id, monto_total, monto_servicio,
@@ -911,32 +888,21 @@ async def registrar_diagnostico(
                 metodo_pago = EXCLUDED.metodo_pago,
                 estado = 'completado',
                 fecha_pago = CURRENT_TIMESTAMP
-        """, (
-            asignacion['incidente_id'],
-            asignacion_id,
-            data.costo,
-            data.costo,
-            comision,
-            monto_taller,
-            data.metodo_pago,
-        ))
+        """, (asignacion['incidente_id'], asignacion_id, data.costo, data.costo, comision, monto_taller, data.metodo_pago))
 
-        # Notificar al cliente: servicio completado
-        cur.execute(
-            "SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s",
-            (asignacion['incidente_id'],),
-        )
+        cur.execute("SELECT usuario_id FROM INCIDENTE WHERE incidente_id = %s", (asignacion['incidente_id'],))
         inc_row = cur.fetchone()
+        cliente_uid = None
         if inc_row:
+            cliente_uid = inc_row["usuario_id"]
             crear_notificacion(
-                db, inc_row["usuario_id"],
+                db, cliente_uid,
                 "servicio_completado",
                 "Servicio finalizado",
                 f"Tu asistencia vehicular ha concluido. Costo total: Bs {data.costo:.2f}.",
                 {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "costo": data.costo},
             )
 
-        # Notificar al taller: pago procesado
         cur.execute("SELECT usuario_id FROM TALLER WHERE taller_id = %s", (taller_id,))
         taller_row = cur.fetchone()
         if taller_row:
@@ -949,6 +915,17 @@ async def registrar_diagnostico(
             )
 
         db.commit()
+
+        if cliente_uid:
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": "servicio_completado",
+                "titulo": "Servicio finalizado",
+                "mensaje": f"Tu asistencia vehicular ha concluido. Costo total: Bs {data.costo:.2f}.",
+                "incidente_id": asignacion['incidente_id'],
+                "asignacion_id": asignacion_id,
+                "costo": data.costo
+            }))
+
         return MessageResponse(success=True, message="Diagnóstico y costo registrados correctamente")
 
     except HTTPException:

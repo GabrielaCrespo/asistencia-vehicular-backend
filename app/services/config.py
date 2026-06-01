@@ -1,19 +1,29 @@
 import os
 from dotenv import load_dotenv
 from pathlib import Path
+from urllib.parse import urlparse
 
-# Cargar variables de entorno con prioridad: .env.local > .env > valores por defecto
 backend_dir = Path(__file__).parent.parent.parent
 env_local_path = backend_dir / ".env.local"
 env_path = backend_dir / ".env"
 
-# Primero cargar .env (defaults p/ producción)
 if env_path.exists():
     load_dotenv(env_path, override=False)
 
-# Luego cargar .env.local si existe (sobreescribe .env para desarrollo local)
 if env_local_path.exists():
     load_dotenv(env_local_path, override=True)
+
+# Render inyecta DATABASE_URL al vincular una BD al servicio web.
+# Si las variables individuales no están, las parseamos de DATABASE_URL.
+_database_url = os.getenv("DATABASE_URL", "")
+if _database_url and not os.getenv("DB_HOST"):
+    _parsed = urlparse(_database_url)
+    os.environ.setdefault("DB_HOST", _parsed.hostname or "")
+    os.environ.setdefault("DB_PORT", str(_parsed.port or 5432))
+    os.environ.setdefault("DB_NAME", (_parsed.path or "").lstrip("/"))
+    os.environ.setdefault("DB_USER", _parsed.username or "")
+    os.environ.setdefault("DB_PASS", _parsed.password or "")
+
 
 class Config:
     DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -29,4 +39,3 @@ class Config:
     CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
 
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    

@@ -3,6 +3,7 @@ import psycopg2.pool
 import traceback
 from typing import Optional
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from ..services.config import Config
 import logging
 
@@ -18,6 +19,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
     global _pool
     if _pool is None or _pool.closed:
         logger.info(f"Conectando a BD: host={Config.DB_HOST} db={Config.DB_NAME} user={Config.DB_USER}")
+        is_local = Config.DB_HOST in ("localhost", "127.0.0.1")
         _pool = psycopg2.pool.ThreadedConnectionPool(
             minconn=1,
             maxconn=10,
@@ -26,7 +28,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
             database=Config.DB_NAME,
             user=Config.DB_USER,
             password=Config.DB_PASS,
-            sslmode="require",
+            sslmode="disable" if is_local else "require",
             connect_timeout=15,
             keepalives_count=5,
         )
@@ -61,7 +63,7 @@ class Database:
                 status_code=503,
                 detail="No se pudo conectar a la base de datos."
             )
-        except HTTPException:
+        except (HTTPException, RequestValidationError):
                 raise
         except Exception as e:
                     logger.error(f"❌ Error inesperado BD: {type(e).__name__}: {e}\n{traceback.format_exc()}")

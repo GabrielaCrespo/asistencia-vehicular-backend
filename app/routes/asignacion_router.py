@@ -264,7 +264,7 @@ async def listar_solicitudes_disponibles(
             FROM INCIDENTE i
             JOIN USUARIO  u ON i.usuario_id  = u.usuario_id
             JOIN VEHICULO v ON i.vehiculo_id = v.vehiculo_id
-            WHERE i.estado = 'pendiente'
+            WHERE i.estado IN ('pendiente', 'cotizacion')
               AND NOT EXISTS (
                 SELECT 1 FROM ASIGNACION rej
                 WHERE rej.incidente_id = i.incidente_id

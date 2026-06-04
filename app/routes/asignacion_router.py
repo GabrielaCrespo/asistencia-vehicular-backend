@@ -767,8 +767,14 @@ async def actualizar_estado(
         if asignacion['estado'] == 'completada':
             raise HTTPException(status_code=400, detail="La asignación ya está completada")
 
+        timestamp_extra = ""
+        if data.estado == 'en_servicio':
+            timestamp_extra = ", fecha_inicio_servicio = CURRENT_TIMESTAMP"
+        elif data.estado == 'completada':
+            timestamp_extra = ", fecha_cierre_servicio = CURRENT_TIMESTAMP"
+
         cur.execute(
-            "UPDATE ASIGNACION SET estado = %s WHERE asignacion_id = %s",
+            f"UPDATE ASIGNACION SET estado = %s{timestamp_extra} WHERE asignacion_id = %s",
             (data.estado, asignacion_id)
         )
 
@@ -862,7 +868,10 @@ async def registrar_diagnostico(
         monto_taller = round(data.costo * 0.90, 2)
 
         cur.execute("""
-            UPDATE ASIGNACION SET observaciones = %s, estado = 'completada'
+            UPDATE ASIGNACION
+            SET observaciones = %s,
+                estado = 'completada',
+                fecha_cierre_servicio = COALESCE(fecha_cierre_servicio, CURRENT_TIMESTAMP)
             WHERE asignacion_id = %s
         """, (data.observaciones, asignacion_id))
 

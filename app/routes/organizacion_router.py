@@ -664,6 +664,357 @@ async def toggle_disponibilidad_taller(
         cur.close()
 
 
+@router.get("/{org_id}/analitica")
+async def analitica_global(
+    org_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """
+    KPIs operacionales avanzados del tenant:
+    tiempos promedio, SLA, incidentes por tipo,
+    zonas calientes y ranking de talleres.
+    """
+    payload = get_token_payload(authorization)
+    assert_org_access(payload, org_id)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        # 1. Tiempos promedio y SLA
+        # - Asignación  = fecha_asignacion - incidente.fecha_creacion  (respuesta al reporte)
+        # - Llegada     = fecha_inicio_servicio - fecha_asignacion  (solo si se registró llegada)
+        # - Resolución  = fecha_cierre_servicio - COALESCE(fecha_inicio, fecha_asignacion)
+        #   (funciona con o sin registro de llegada; AVG ignora NULLs)
+        # - SLA cumplido si respuesta ≤ 15 min
+        cur.execute("""
+            SELECT
+                ROUND(AVG(
+                    CASE WHEN a.fecha_aceptacion IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                    END
+                )::NUMERIC, 2)  AS prom_asignacion_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_inicio_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_inicio_servicio - a.fecha_asignacion)) / 60
+                    END
+                )::NUMERIC, 2)  AS prom_llegada_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_cierre_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (
+                             a.fecha_cierre_servicio
+                             - COALESCE(a.fecha_inicio_servicio, a.fecha_asignacion)
+                         )) / 60
+                    END
+                )::NUMERIC, 2)  AS prom_finalizacion_min,
+                COUNT(*) FILTER (WHERE a.fecha_aceptacion IS NOT NULL) AS total_evaluados_sla,
+                COUNT(*) FILTER (
+                    WHERE a.fecha_aceptacion IS NOT NULL
+                    AND EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60 <= 15
+                ) AS sla_cumplidos
+            FROM asignacion a
+            JOIN taller t    ON t.taller_id    = a.taller_id
+            JOIN incidente i ON i.incidente_id = a.incidente_id
+            WHERE t.organizacion_id = %s
+        """, (org_id,))
+        tiempos = cur.fetchone()
+
+        # 2. Total emergencias del tenant
+        cur.execute("""
+            SELECT COUNT(DISTINCT i.incidente_id) AS total
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            JOIN taller t ON t.taller_id = a.taller_id
+            WHERE t.organizacion_id = %s
+        """, (org_id,))
+        total_row = cur.fetchone()
+
+        # 3. Incidentes por tipo
+        cur.execute("""
+            SELECT
+                COALESCE(i.tipo_problema, 'Sin clasificar') AS tipo,
+                COUNT(DISTINCT i.incidente_id) AS cantidad
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            JOIN taller t ON t.taller_id = a.taller_id
+            WHERE t.organizacion_id = %s
+            GROUP BY i.tipo_problema
+            ORDER BY cantidad DESC
+        """, (org_id,))
+        por_tipo = cur.fetchall()
+
+        # 4. Casos cancelados
+        cur.execute("""
+            SELECT COUNT(DISTINCT i.incidente_id) AS cancelados
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            JOIN taller t ON t.taller_id = a.taller_id
+            WHERE t.organizacion_id = %s
+              AND i.estado = 'cancelado'
+        """, (org_id,))
+        cancelados_row = cur.fetchone()
+
+        # 5. Zonas con más incidentes (top 5, lat/lng redondeados a 1 decimal ≈ 11 km)
+        cur.execute("""
+            SELECT
+                ROUND(i.latitud::NUMERIC,  1) AS lat,
+                ROUND(i.longitud::NUMERIC, 1) AS lng,
+                COUNT(DISTINCT i.incidente_id) AS cantidad
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            JOIN taller t ON t.taller_id = a.taller_id
+            WHERE t.organizacion_id = %s
+              AND i.latitud  IS NOT NULL
+              AND i.longitud IS NOT NULL
+            GROUP BY ROUND(i.latitud::NUMERIC, 1), ROUND(i.longitud::NUMERIC, 1)
+            ORDER BY cantidad DESC
+            LIMIT 5
+        """, (org_id,))
+        zonas = cur.fetchall()
+
+        # 6. Ranking de talleres por eficiencia
+        # Score = 40% tasa_completados + 30% calificación/5 + 30% SLA_compliance
+        cur.execute("""
+            SELECT
+                t.taller_id,
+                t.razon_social,
+                COUNT(DISTINCT i.incidente_id)  AS total,
+                COUNT(DISTINCT CASE WHEN i.estado IN ('atendido','completado','cerrada')
+                      THEN i.incidente_id END)  AS completados,
+                COALESCE(ROUND(AVG(c.puntuacion)::NUMERIC, 2), 0) AS calificacion,
+                COALESCE(ROUND(AVG(
+                    EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                ) FILTER (WHERE a.fecha_aceptacion IS NOT NULL)::NUMERIC, 2), 0) AS tiempo_prom_asignacion_min,
+                ROUND((
+                    0.4 * COALESCE(
+                        COUNT(DISTINCT CASE WHEN i.estado IN ('atendido','completado','cerrada')
+                              THEN i.incidente_id END)::float
+                        / NULLIF(COUNT(DISTINCT i.incidente_id), 0), 0)
+                    + 0.3 * COALESCE(AVG(c.puntuacion), 0) / 5.0
+                    + 0.3 * COALESCE(
+                        COUNT(*) FILTER (
+                            WHERE a.fecha_aceptacion IS NOT NULL
+                            AND EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60 <= 15
+                        )::float
+                        / NULLIF(COUNT(*) FILTER (WHERE a.fecha_aceptacion IS NOT NULL), 0), 0)
+                )::NUMERIC * 100, 1) AS score
+            FROM taller t
+            LEFT JOIN asignacion a  ON a.taller_id    = t.taller_id
+            LEFT JOIN incidente i   ON i.incidente_id = a.incidente_id
+            LEFT JOIN calificacion c ON c.taller_id   = t.taller_id
+            WHERE t.organizacion_id = %s
+            GROUP BY t.taller_id, t.razon_social
+            ORDER BY score DESC NULLS LAST
+        """, (org_id,))
+        ranking = cur.fetchall()
+
+        sla_ev = int(tiempos["total_evaluados_sla"] or 0)
+        sla_cu = int(tiempos["sla_cumplidos"] or 0)
+        sla_pct = round(sla_cu * 100.0 / sla_ev, 1) if sla_ev > 0 else None
+
+        return {
+            "organizacion_id":      org_id,
+            "total_emergencias":    int(total_row["total"] or 0),
+            "tiempos": {
+                "promedio_asignacion_min":   float(tiempos["prom_asignacion_min"])   if tiempos["prom_asignacion_min"]   is not None else None,
+                "promedio_llegada_min":      float(tiempos["prom_llegada_min"])      if tiempos["prom_llegada_min"]      is not None else None,
+                "promedio_finalizacion_min": float(tiempos["prom_finalizacion_min"]) if tiempos["prom_finalizacion_min"] is not None else None,
+            },
+            "casos_cancelados":     int(cancelados_row["cancelados"] or 0),
+            "sla_cumplimiento_pct": sla_pct,
+            "sla_total_evaluados":  sla_ev,
+            "incidentes_por_tipo":  [{"tipo": r["tipo"], "cantidad": int(r["cantidad"])} for r in por_tipo],
+            "zonas_top":            [{"lat": float(r["lat"]), "lng": float(r["lng"]), "cantidad": int(r["cantidad"])} for r in zonas],
+            "ranking_talleres": [
+                {
+                    "taller_id":                  r["taller_id"],
+                    "nombre":                     r["razon_social"],
+                    "completados":                int(r["completados"] or 0),
+                    "total":                      int(r["total"] or 0),
+                    "calificacion":               float(r["calificacion"] or 0),
+                    "tiempo_prom_asignacion_min": float(r["tiempo_prom_asignacion_min"] or 0),
+                    "score":                      float(r["score"] or 0),
+                }
+                for r in ranking
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculando analítica: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.get("/{org_id}/analitica/taller/{taller_id}")
+async def analitica_taller(
+    org_id: int,
+    taller_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """
+    KPIs operacionales del taller individual más comparación
+    contra el promedio del tenant.
+    """
+    payload = get_token_payload(authorization)
+    assert_org_access(payload, org_id)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            "SELECT taller_id, razon_social FROM taller WHERE taller_id = %s AND organizacion_id = %s",
+            (taller_id, org_id)
+        )
+        taller = cur.fetchone()
+        if not taller:
+            raise HTTPException(status_code=404, detail="Taller no encontrado en esta organización")
+
+        # KPIs propios del taller
+        cur.execute("""
+            SELECT
+                COUNT(DISTINCT i.incidente_id)                                                                 AS total_emergencias,
+                COUNT(DISTINCT CASE WHEN i.estado = 'cancelado' THEN i.incidente_id END)                      AS cancelados,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_aceptacion IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_asignacion_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_inicio_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_inicio_servicio - a.fecha_asignacion)) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_llegada_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_cierre_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (
+                             a.fecha_cierre_servicio
+                             - COALESCE(a.fecha_inicio_servicio, a.fecha_asignacion)
+                         )) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_finalizacion_min,
+                COUNT(*) FILTER (WHERE a.fecha_aceptacion IS NOT NULL)                                        AS sla_evaluados,
+                COUNT(*) FILTER (
+                    WHERE a.fecha_aceptacion IS NOT NULL
+                    AND EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60 <= 15
+                )                                                                                              AS sla_cumplidos
+            FROM asignacion a
+            JOIN incidente i ON i.incidente_id = a.incidente_id
+            WHERE a.taller_id = %s
+        """, (taller_id,))
+        stats = cur.fetchone()
+
+        # Incidentes por tipo del taller
+        cur.execute("""
+            SELECT COALESCE(i.tipo_problema, 'Sin clasificar') AS tipo, COUNT(*) AS cantidad
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            WHERE a.taller_id = %s
+            GROUP BY i.tipo_problema ORDER BY cantidad DESC
+        """, (taller_id,))
+        por_tipo = cur.fetchall()
+
+        # Rendimiento mensual – últimos 12 meses
+        cur.execute("""
+            SELECT
+                EXTRACT(YEAR  FROM a.fecha_asignacion)::INT  AS anio,
+                EXTRACT(MONTH FROM a.fecha_asignacion)::INT  AS mes,
+                TO_CHAR(a.fecha_asignacion, 'Mon')           AS mes_nombre,
+                COUNT(DISTINCT a.incidente_id)               AS total,
+                COUNT(DISTINCT CASE WHEN i.estado IN ('atendido','completado')
+                      THEN a.incidente_id END)               AS completados
+            FROM asignacion a
+            JOIN incidente i ON i.incidente_id = a.incidente_id
+            WHERE a.taller_id = %s
+              AND a.fecha_asignacion >= CURRENT_DATE - INTERVAL '12 months'
+            GROUP BY EXTRACT(YEAR FROM a.fecha_asignacion),
+                     EXTRACT(MONTH FROM a.fecha_asignacion),
+                     TO_CHAR(a.fecha_asignacion, 'Mon')
+            ORDER BY anio, mes
+        """, (taller_id,))
+        mensual = cur.fetchall()
+
+        # Promedios del tenant para comparación
+        cur.execute("""
+            SELECT
+                ROUND(AVG(
+                    CASE WHEN a.fecha_aceptacion IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_asignacion_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_inicio_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_inicio_servicio - a.fecha_asignacion)) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_llegada_min,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_cierre_servicio IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (
+                             a.fecha_cierre_servicio
+                             - COALESCE(a.fecha_inicio_servicio, a.fecha_asignacion)
+                         )) / 60
+                    END
+                )::NUMERIC, 2)                                                                                 AS prom_finalizacion_min,
+                COUNT(*) FILTER (WHERE a.fecha_aceptacion IS NOT NULL)                                        AS sla_evaluados,
+                COUNT(*) FILTER (
+                    WHERE a.fecha_aceptacion IS NOT NULL
+                    AND EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60 <= 15
+                )                                                                                              AS sla_cumplidos
+            FROM asignacion a
+            JOIN taller t    ON t.taller_id    = a.taller_id
+            JOIN incidente i ON i.incidente_id = a.incidente_id
+            WHERE t.organizacion_id = %s
+        """, (org_id,))
+        tenant_avg = cur.fetchone()
+
+        def safe_f(val):
+            return float(val) if val is not None else None
+
+        sla_ev = int(stats["sla_evaluados"] or 0)
+        sla_cu = int(stats["sla_cumplidos"] or 0)
+        sla_pct = round(sla_cu * 100.0 / sla_ev, 1) if sla_ev > 0 else None
+
+        t_sla_ev = int(tenant_avg["sla_evaluados"] or 0)
+        t_sla_cu = int(tenant_avg["sla_cumplidos"] or 0)
+        t_sla_pct = round(t_sla_cu * 100.0 / t_sla_ev, 1) if t_sla_ev > 0 else None
+
+        return {
+            "taller_id":        taller_id,
+            "taller_nombre":    taller["razon_social"],
+            "total_emergencias": int(stats["total_emergencias"] or 0),
+            "casos_cancelados":  int(stats["cancelados"] or 0),
+            "tiempos": {
+                "promedio_asignacion_min":  safe_f(stats["prom_asignacion_min"]),
+                "promedio_llegada_min":     safe_f(stats["prom_llegada_min"]),
+                "promedio_resolucion_min":  safe_f(stats["prom_finalizacion_min"]),
+            },
+            "sla_cumplimiento_pct":  sla_pct,
+            "sla_total_evaluados":   sla_ev,
+            "incidentes_por_tipo":   [{"tipo": r["tipo"], "cantidad": int(r["cantidad"])} for r in por_tipo],
+            "rendimiento_mensual": [
+                {
+                    "anio":       r["anio"],
+                    "mes":        r["mes"],
+                    "mes_nombre": r["mes_nombre"],
+                    "total":      int(r["total"]),
+                    "completados": int(r["completados"]),
+                }
+                for r in mensual
+            ],
+            "comparacion_tenant": {
+                "promedio_asignacion_min":   safe_f(tenant_avg["prom_asignacion_min"]),
+                "promedio_llegada_min":      safe_f(tenant_avg["prom_llegada_min"]),
+                "promedio_finalizacion_min": safe_f(tenant_avg["prom_finalizacion_min"]),
+                "sla_cumplimiento_pct":      t_sla_pct,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculando analítica del taller: {str(e)}")
+    finally:
+        cur.close()
+
+
 @router.get("/{org_id}/reportes")
 async def reportes_financieros_org(
     org_id: int,

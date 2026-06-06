@@ -9,6 +9,7 @@ from ..classes.postgresql import Database
 from ..utils.notificaciones import crear_notificacion
 from ..utils.tenant_deps import get_token_payload, assert_taller_access
 from ..managers.websocket_manager import manager
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
 
@@ -593,6 +594,9 @@ async def aceptar_solicitud(
                 {"incidente_id": data.incidente_id, "asignacion_id": asignacion_id, "taller_id": taller_id},
             )
 
+        usuario_id_taller = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_taller, 'ACEPTAR_SOLICITUD', 'asignacion',
+                     asignacion_id, f'Taller {taller_id} aceptó incidente {data.incidente_id}')
         db.commit()
 
         if cliente_uid:
@@ -664,6 +668,10 @@ async def rechazar_solicitud(
                 {"incidente_id": data.incidente_id, "taller_id": taller_id},
             )
 
+        usuario_id_taller = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_taller, 'RECHAZAR_SOLICITUD', 'asignacion',
+                     data.incidente_id, f'Taller {taller_id} rechazó incidente {data.incidente_id}',
+                     {'observaciones': data.observaciones})
         db.commit()
 
         if inc_row:
@@ -727,6 +735,9 @@ async def asignar_tecnico(
         )
         cur.execute("UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s", (data.tecnico_id,))
 
+        usuario_id_taller = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_taller, 'ASIGNAR_TECNICO', 'asignacion',
+                     asignacion_id, f'Técnico {data.tecnico_id} asignado a asignación {asignacion_id}')
         db.commit()
         return MessageResponse(success=True, message="Técnico asignado correctamente")
 
@@ -818,6 +829,9 @@ async def actualizar_estado(
                         {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id},
                     )
 
+        usuario_id_taller = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_taller, 'CAMBIO_ESTADO_ASIGNACION', 'asignacion',
+                     asignacion_id, f'Estado asignación {asignacion_id}: {asignacion["estado"]} → {data.estado}')
         db.commit()
 
         if cliente_uid and titulo_c:
@@ -923,6 +937,10 @@ async def registrar_diagnostico(
                 {"incidente_id": asignacion['incidente_id'], "asignacion_id": asignacion_id, "monto_taller": monto_taller},
             )
 
+        usuario_id_taller = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_taller, 'REGISTRAR_DIAGNOSTICO', 'asignacion',
+                     asignacion_id, f'Diagnóstico registrado, costo Bs {data.costo:.2f}',
+                     {'costo': data.costo, 'metodo_pago': data.metodo_pago})
         db.commit()
 
         if cliente_uid:

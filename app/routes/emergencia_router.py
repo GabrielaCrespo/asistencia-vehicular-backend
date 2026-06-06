@@ -11,6 +11,7 @@ from ..classes.postgresql import Database
 from ..services.config import Config
 from ..utils.notificaciones import crear_notificacion
 from ..utils.tenant_deps import get_token_payload
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/emergencia", tags=["Emergencias"])
 
@@ -173,6 +174,9 @@ async def registrar_emergencia(data: EmergenciaCreate, authorization: str = Head
         except Exception:
             pass  # no interrumpir el flujo principal
 
+        log_bitacora(cur, data.usuario_id, 'CREAR_INCIDENTE', 'incidente',
+                     incidente_id, f'Emergencia registrada: {data.tipo_problema or "sin tipo"}',
+                     {'vehiculo_id': data.vehiculo_id, 'lat': data.latitud, 'lng': data.longitud})
         db.commit()
 
         return {

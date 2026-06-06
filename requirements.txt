@@ -24,5 +24,6 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 google-generativeai==0.8.5
 firebase-admin==6.5.0
+stripe==11.4.1
 uvicorn[standard]==0.44.0
 websockets==12.0

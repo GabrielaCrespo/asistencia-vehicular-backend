@@ -102,3 +102,57 @@ async def marcar_leida(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+
+    # ===================== FCM TOKENS =====================
+
+from pydantic import BaseModel
+
+class FCMTokenRequest(BaseModel):
+    fcm_token: str
+
+@router.post("/registrar-token")
+async def registrar_fcm_token(
+    data: FCMTokenRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Registra o actualiza el token FCM del usuario."""
+    usuario_id = _get_usuario_id(authorization)
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO fcm_token (usuario_id, token, plataforma)
+            VALUES (%s, %s, 'android')
+            ON CONFLICT (usuario_id, token) DO UPDATE
+            SET creado_en = CURRENT_TIMESTAMP
+        """, (usuario_id, data.fcm_token))
+        db.commit()
+        return {"success": True, "message": "Token FCM registrado"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+
+@router.delete("/eliminar-token")
+async def eliminar_fcm_token(
+    data: FCMTokenRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Elimina el token FCM al cerrar sesión."""
+    usuario_id = _get_usuario_id(authorization)
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM fcm_token
+            WHERE usuario_id = %s AND token = %s
+        """, (usuario_id, data.fcm_token))
+        db.commit()
+        return {"success": True, "message": "Token FCM eliminado"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()

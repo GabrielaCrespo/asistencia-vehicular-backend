@@ -99,13 +99,14 @@ async def websocket_endpoint(
                 await websocket.send_json({"tipo": "pong"})
             else:
                 try:
-                    import json
                     msg = json.loads(data)
                     if msg.get("tipo") == "ubicacion_tecnico":
+                        print(f"[WS] ✅ Técnico {usuario_id} envió ubicación: lat={msg.get('latitud')}, lng={msg.get('longitud')}, incidente={msg.get('incidente_id')}")
                         db = next(Database.get_db())
                         await manager.forward_to_incident_client(usuario_id, msg, db)
-                except Exception:
-                    pass
+                        print(f"[WS] ✅ forward ejecutado")
+                except Exception as e:
+                    print(f"[WS] ❌ Error: {e}")
     except WebSocketDisconnect:
         manager.disconnect(websocket, usuario_id)
 

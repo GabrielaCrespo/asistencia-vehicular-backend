@@ -15,6 +15,7 @@ Responsabilidades:
 """
 
 from fastapi import APIRouter, HTTPException, Header, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,8 @@ from typing import Optional, List
 import bcrypt
 import jwt
 import json
+import csv
+import io
 
 from ..services.config import Config
 from ..classes.postgresql import Database
@@ -887,6 +890,233 @@ async def listar_usuarios(
         cur.close()
 
 
+class UserCreateRequest(BaseModel):
+    nombre: str
+    email: EmailStr
+    password: str
+    telefono: Optional[str] = None
+    rol_nombre: str
+    organizacion_id: Optional[int] = None
+    documento_identidad: Optional[str] = None
+
+
+class UserUpdateRequest(BaseModel):
+    nombre: Optional[str] = None
+    email: Optional[EmailStr] = None
+    telefono: Optional[str] = None
+    rol_nombre: Optional[str] = None
+    organizacion_id: Optional[int] = None
+    documento_identidad: Optional[str] = None
+
+
+@router.get("/usuarios/{usuario_id}")
+async def get_usuario_detalle(
+    usuario_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Detalle completo de un usuario."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT
+                u.usuario_id, u.nombre, u.email, u.telefono, u.estado,
+                u.documento_identidad, u.fecha_registro, u.ultimo_acceso,
+                u.organizacion_id,
+                r.nombre AS rol, r.rol_id,
+                COALESCE(o.nombre, 'Sin organización') AS organizacion_nombre,
+                CASE
+                    WHEN r.nombre = 'taller'
+                    THEN (SELECT t.razon_social FROM taller t WHERE t.usuario_id = u.usuario_id LIMIT 1)
+                    WHEN r.nombre = 'tecnico'
+                    THEN (SELECT tec.especialidad FROM tecnico tec WHERE tec.usuario_id = u.usuario_id LIMIT 1)
+                    ELSE NULL
+                END AS info_extra
+            FROM usuario u
+            INNER JOIN rol r ON u.rol_id = r.rol_id
+            LEFT JOIN organizacion o ON o.organizacion_id = u.organizacion_id
+            WHERE u.usuario_id = %s AND r.nombre != 'administrador'
+        """, (usuario_id,))
+        user = cur.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        return {"success": True, "data": dict(user)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.post("/usuarios", status_code=201)
+async def crear_usuario(
+    data: UserCreateRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Crea un nuevo usuario en la plataforma."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    if data.rol_nombre == "administrador":
+        raise HTTPException(status_code=400, detail="No se puede crear un usuario con rol administrador")
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT usuario_id FROM usuario WHERE email = %s LIMIT 1", (data.email.lower(),))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="El correo ya está registrado")
+
+        cur.execute("SELECT rol_id FROM rol WHERE nombre = %s LIMIT 1", (data.rol_nombre,))
+        rol_row = cur.fetchone()
+        if not rol_row:
+            raise HTTPException(status_code=400, detail=f"Rol '{data.rol_nombre}' no encontrado")
+
+        password_hash = _hash_password(data.password)
+        cur.execute("""
+            INSERT INTO usuario
+                (rol_id, nombre, email, telefono, contrasena_hash, estado, organizacion_id, documento_identidad)
+            VALUES (%s, %s, %s, %s, %s, 'activo', %s, %s)
+            RETURNING usuario_id
+        """, (
+            rol_row["rol_id"], data.nombre.upper(), data.email.lower(),
+            data.telefono, password_hash, data.organizacion_id, data.documento_identidad,
+        ))
+        nuevo_id = cur.fetchone()["usuario_id"]
+
+        _log_bitacora(cur, sa_id, "CREAR_USUARIO", "usuario", nuevo_id,
+                      f"Usuario creado: {data.email} con rol {data.rol_nombre}")
+        db.commit()
+        return {"success": True, "message": "Usuario creado exitosamente", "usuario_id": nuevo_id}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.put("/usuarios/{usuario_id}")
+async def editar_usuario(
+    usuario_id: int,
+    data: UserUpdateRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Edita los datos de un usuario."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT u.usuario_id FROM usuario u JOIN rol r ON u.rol_id = r.rol_id
+            WHERE u.usuario_id = %s AND r.nombre != 'administrador'
+        """, (usuario_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+        updates: dict = {}
+        if data.nombre is not None:
+            updates["nombre"] = data.nombre.upper()
+        if data.email is not None:
+            cur.execute(
+                "SELECT usuario_id FROM usuario WHERE email = %s AND usuario_id != %s LIMIT 1",
+                (data.email.lower(), usuario_id)
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="El correo ya está en uso")
+            updates["email"] = data.email.lower()
+        if data.telefono is not None:
+            updates["telefono"] = data.telefono
+        if data.organizacion_id is not None:
+            updates["organizacion_id"] = data.organizacion_id
+        if data.documento_identidad is not None:
+            updates["documento_identidad"] = data.documento_identidad
+        if data.rol_nombre is not None:
+            if data.rol_nombre == "administrador":
+                raise HTTPException(status_code=400, detail="No se puede asignar ese rol")
+            cur.execute("SELECT rol_id FROM rol WHERE nombre = %s LIMIT 1", (data.rol_nombre,))
+            rol_row = cur.fetchone()
+            if not rol_row:
+                raise HTTPException(status_code=400, detail=f"Rol '{data.rol_nombre}' no encontrado")
+            updates["rol_id"] = rol_row["rol_id"]
+
+        if updates:
+            set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+            cur.execute(
+                f"UPDATE usuario SET {set_clause} WHERE usuario_id = %s",
+                list(updates.values()) + [usuario_id]
+            )
+
+        _log_bitacora(cur, sa_id, "EDITAR_USUARIO", "usuario", usuario_id, "Usuario editado", updates)
+        db.commit()
+        return {"success": True, "message": "Usuario actualizado correctamente"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.patch("/usuarios/{usuario_id}/estado")
+async def toggle_estado_usuario(
+    usuario_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Activa o desactiva un usuario."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT u.usuario_id, r.nombre AS rol FROM usuario u
+            JOIN rol r ON u.rol_id = r.rol_id
+            WHERE u.usuario_id = %s
+        """, (usuario_id,))
+        user = cur.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        if user["rol"] == "administrador":
+            raise HTTPException(status_code=403, detail="No se puede modificar el SuperAdministrador")
+
+        cur.execute("""
+            UPDATE usuario
+            SET estado = CASE WHEN estado = 'activo' THEN 'inactivo' ELSE 'activo' END
+            WHERE usuario_id = %s
+            RETURNING usuario_id, nombre, estado
+        """, (usuario_id,))
+        row = cur.fetchone()
+
+        _log_bitacora(cur, sa_id, "CAMBIO_ESTADO_USUARIO", "usuario", usuario_id,
+                      f"Estado cambiado a {row['estado']}")
+        db.commit()
+        return {"success": True, "usuario_id": row["usuario_id"],
+                "nombre": row["nombre"], "estado": row["estado"]}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
 # ===================== KPIs GLOBALES =====================
 
 @router.get("/kpis/organizaciones")
@@ -1095,6 +1325,604 @@ async def listar_bitacora(
             "offset": offset,
             "data": [dict(r) for r in rows],
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+# ===================== COPIAS DE SEGURIDAD =====================
+
+def _ensure_backup_tables(cur) -> None:
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS backup_config (
+            config_id       SERIAL PRIMARY KEY,
+            activo          BOOLEAN NOT NULL DEFAULT TRUE,
+            frecuencia      VARCHAR(20) NOT NULL DEFAULT 'diario',
+            hora            VARCHAR(5)  NOT NULL DEFAULT '02:00',
+            retencion_dias  INTEGER     NOT NULL DEFAULT 30,
+            actualizado_por INTEGER REFERENCES usuario(usuario_id),
+            actualizado_en  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS backup_historial (
+            historial_id  SERIAL PRIMARY KEY,
+            tipo          VARCHAR(20)  NOT NULL,
+            estado        VARCHAR(30)  NOT NULL DEFAULT 'completado',
+            usuario_id    INTEGER REFERENCES usuario(usuario_id),
+            fecha         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            nombre_archivo VARCHAR(255),
+            notas         TEXT
+        )
+    """)
+
+
+class BackupConfigRequest(BaseModel):
+    activo: bool = True
+    frecuencia: str = "diario"
+    hora: str = "02:00"
+    retencion_dias: int = 30
+
+
+@router.get("/backup/csv")
+async def descargar_backup_csv(
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Genera y descarga un CSV con los datos principales del sistema."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_backup_tables(cur)
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        tables = [
+            (
+                "organizacion",
+                "SELECT organizacion_id, nombre, descripcion, nit, email_contacto, telefono, plan, estado, creado_en "
+                "FROM organizacion ORDER BY organizacion_id",
+            ),
+            (
+                "taller",
+                "SELECT taller_id, razon_social, direccion, disponible, calificacion_promedio, "
+                "COALESCE(estado,'activo') AS estado, creado_en FROM taller ORDER BY taller_id",
+            ),
+            (
+                "usuario",
+                "SELECT u.usuario_id, u.nombre, u.email, u.telefono, u.estado, u.fecha_registro, r.nombre AS rol "
+                "FROM usuario u JOIN rol r ON u.rol_id = r.rol_id "
+                "WHERE r.nombre != 'administrador' ORDER BY u.usuario_id",
+            ),
+            (
+                "tecnico",
+                "SELECT tecnico_id, nombre, especialidad, disponible, creado_en "
+                "FROM tecnico ORDER BY tecnico_id",
+            ),
+            (
+                "incidente",
+                "SELECT incidente_id, descripcion, tipo_problema, estado, prioridad, latitud, longitud "
+                "FROM incidente ORDER BY incidente_id",
+            ),
+            (
+                "asignacion",
+                "SELECT asignacion_id, incidente_id, taller_id, tecnico_id, estado, "
+                "fecha_asignacion, fecha_aceptacion, fecha_cierre_servicio "
+                "FROM asignacion ORDER BY asignacion_id",
+            ),
+            (
+                "cotizacion",
+                "SELECT cotizacion_id, incidente_id, taller_id, costo_estimado, tiempo_estimado, observaciones, estado, fecha_creacion "
+                "FROM cotizacion ORDER BY cotizacion_id",
+            ),
+            (
+                "pago",
+                "SELECT pago_id, asignacion_id, monto_total, monto_taller, estado, creado_en "
+                "FROM pago ORDER BY pago_id",
+            ),
+        ]
+
+        for table_name, query in tables:
+            writer.writerow([f"=== TABLA: {table_name.upper()} ==="])
+            try:
+                cur.execute(query)
+                rows = cur.fetchall()
+                if rows:
+                    writer.writerow(list(rows[0].keys()))
+                    for row in rows:
+                        writer.writerow([str(v) if v is not None else "" for v in row.values()])
+                else:
+                    writer.writerow(["(sin datos)"])
+            except Exception as table_err:
+                db.rollback()
+                writer.writerow([f"ERROR al leer tabla: {str(table_err)}"])
+            writer.writerow([])
+
+        now_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"backup_{now_str}.csv"
+
+        cur.execute(
+            "INSERT INTO backup_historial (tipo, estado, usuario_id, nombre_archivo) VALUES ('manual', 'completado', %s, %s)",
+            (sa_id, filename),
+        )
+        _log_bitacora(cur, sa_id, "BACKUP_MANUAL", "sistema", None,
+                      f"Respaldo manual descargado: {filename}")
+        db.commit()
+
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error generando backup: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.get("/backup/config")
+async def get_backup_config(
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Obtiene la configuración actual de respaldo automático."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_backup_tables(cur)
+        db.commit()
+        cur.execute("SELECT * FROM backup_config ORDER BY config_id DESC LIMIT 1")
+        config = cur.fetchone()
+        return {"success": True, "config": dict(config) if config else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.post("/backup/config")
+async def save_backup_config(
+    data: BackupConfigRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Guarda la configuración de respaldo automático."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    frecuencias_validas = ("diario", "semanal", "mensual")
+    if data.frecuencia not in frecuencias_validas:
+        raise HTTPException(status_code=400, detail="Frecuencia inválida")
+    if data.retencion_dias not in (7, 15, 30):
+        raise HTTPException(status_code=400, detail="Retención debe ser 7, 15 o 30 días")
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_backup_tables(cur)
+        cur.execute("DELETE FROM backup_config")
+        cur.execute(
+            "INSERT INTO backup_config (activo, frecuencia, hora, retencion_dias, actualizado_por, actualizado_en) "
+            "VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP) RETURNING config_id",
+            (data.activo, data.frecuencia, data.hora, data.retencion_dias, sa_id),
+        )
+        config_id = cur.fetchone()["config_id"]
+
+        if data.activo:
+            cur.execute(
+                "INSERT INTO backup_historial (tipo, estado, usuario_id, notas) VALUES ('automatico', 'programado', %s, %s)",
+                (sa_id, f"Programado: {data.frecuencia} a las {data.hora}, retención {data.retencion_dias} días"),
+            )
+
+        _log_bitacora(cur, sa_id, "CONFIGURAR_BACKUP", "sistema", None,
+                      f"Backup automático configurado: {data.frecuencia} a las {data.hora}, retención {data.retencion_dias}d")
+        db.commit()
+        return {
+            "success": True,
+            "message": "Configuración de respaldo automático guardada correctamente.",
+            "config_id": config_id,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.get("/backup/historial")
+async def get_backup_historial(
+    limit: int = 50,
+    offset: int = 0,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Lista el historial de respaldos."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_backup_tables(cur)
+        db.commit()
+        cur.execute("""
+            SELECT h.historial_id, h.tipo, h.estado, h.fecha, h.nombre_archivo, h.notas,
+                   COALESCE(u.nombre, 'Sistema') AS usuario_nombre
+            FROM backup_historial h
+            LEFT JOIN usuario u ON u.usuario_id = h.usuario_id
+            ORDER BY h.fecha DESC
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
+        rows = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) AS total FROM backup_historial")
+        total = cur.fetchone()["total"]
+
+        return {"success": True, "total": total, "data": [dict(r) for r in rows]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+# ===================== ROLES Y PERMISOS =====================
+
+def _ensure_roles_tables(cur) -> None:
+    """Agrega columnas a rol si no existen y crea tablas de permisos."""
+    cur.execute("ALTER TABLE rol ADD COLUMN IF NOT EXISTS descripcion TEXT")
+    cur.execute("ALTER TABLE rol ADD COLUMN IF NOT EXISTS activo BOOLEAN NOT NULL DEFAULT TRUE")
+    cur.execute("ALTER TABLE rol ADD COLUMN IF NOT EXISTS es_personalizado BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS permiso (
+            permiso_id  SERIAL PRIMARY KEY,
+            codigo      VARCHAR(100) NOT NULL UNIQUE,
+            nombre      VARCHAR(200) NOT NULL,
+            descripcion TEXT,
+            modulo      VARCHAR(100),
+            activo      BOOLEAN NOT NULL DEFAULT TRUE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS rol_permiso (
+            rol_id     INTEGER NOT NULL REFERENCES rol(rol_id) ON DELETE CASCADE,
+            permiso_id INTEGER NOT NULL REFERENCES permiso(permiso_id) ON DELETE CASCADE,
+            PRIMARY KEY (rol_id, permiso_id)
+        )
+    """)
+    permisos_default = [
+        ("ver_dashboard",            "Ver Dashboard Global",           "Dashboard"),
+        ("gestionar_organizaciones", "Gestionar Organizaciones",       "Organizaciones"),
+        ("ver_organizaciones",       "Ver Organizaciones",             "Organizaciones"),
+        ("gestionar_talleres",       "Gestionar Talleres",             "Talleres"),
+        ("ver_talleres",             "Ver Talleres",                   "Talleres"),
+        ("gestionar_usuarios",       "Gestionar Usuarios",             "Usuarios"),
+        ("ver_usuarios",             "Ver Usuarios",                   "Usuarios"),
+        ("ver_kpis",                 "Ver KPIs Globales",              "KPIs"),
+        ("ver_bitacora",             "Ver Bitácora",                   "Auditoría"),
+        ("gestionar_backup",         "Gestionar Copias de Seguridad",  "Backup"),
+        ("ver_reportes",             "Ver Reportes",                   "Reportes"),
+        ("ver_incidentes",           "Ver Incidentes",                 "Incidentes"),
+        ("gestionar_incidentes",     "Gestionar Incidentes",           "Incidentes"),
+        ("ver_cotizaciones",         "Ver Cotizaciones",               "Cotizaciones"),
+        ("gestionar_cotizaciones",   "Gestionar Cotizaciones",         "Cotizaciones"),
+        ("ver_pagos",                "Ver Pagos",                      "Pagos"),
+        ("gestionar_pagos",          "Gestionar Pagos",                "Pagos"),
+        ("gestionar_roles",          "Gestionar Roles y Permisos",     "Administración"),
+    ]
+    for codigo, nombre, modulo in permisos_default:
+        cur.execute(
+            "INSERT INTO permiso (codigo, nombre, modulo) VALUES (%s, %s, %s) ON CONFLICT (codigo) DO NOTHING",
+            (codigo, nombre, modulo)
+        )
+
+
+class RolCreateRequest(BaseModel):
+    nombre: str
+    descripcion: Optional[str] = None
+
+
+class RolUpdateRequest(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+
+
+class RolPermisosRequest(BaseModel):
+    permiso_ids: List[int]
+
+
+@router.get("/roles")
+async def listar_roles(
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Lista todos los roles con conteo de usuarios."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute("""
+            SELECT
+                r.rol_id, r.nombre,
+                COALESCE(r.descripcion, '')          AS descripcion,
+                COALESCE(r.activo, TRUE)             AS activo,
+                COALESCE(r.es_personalizado, FALSE)  AS es_personalizado,
+                COUNT(u.usuario_id)                  AS total_usuarios
+            FROM rol r
+            LEFT JOIN usuario u ON u.rol_id = r.rol_id
+            GROUP BY r.rol_id, r.nombre, r.descripcion, r.activo, r.es_personalizado
+            ORDER BY r.rol_id
+        """)
+        rows = cur.fetchall()
+        return {"success": True, "total": len(rows), "data": [dict(r) for r in rows]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.post("/roles", status_code=201)
+async def crear_rol(
+    data: RolCreateRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Crea un rol personalizado."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    nombre_normalizado = data.nombre.lower().replace(" ", "_")
+    if nombre_normalizado in {"cliente", "taller", "tecnico", "tenant_admin", "administrador"}:
+        raise HTTPException(status_code=400, detail="No se puede usar un nombre de rol reservado")
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        cur.execute("SELECT rol_id FROM rol WHERE nombre = %s LIMIT 1", (nombre_normalizado,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="Ya existe un rol con ese nombre")
+
+        cur.execute("""
+            INSERT INTO rol (nombre, descripcion, activo, es_personalizado)
+            VALUES (%s, %s, TRUE, TRUE) RETURNING rol_id
+        """, (nombre_normalizado, data.descripcion))
+        rol_id = cur.fetchone()["rol_id"]
+
+        _log_bitacora(cur, sa_id, "CREAR_ROL", "rol", rol_id,
+                      f"Rol personalizado creado: {nombre_normalizado}")
+        db.commit()
+        return {"success": True, "message": "Rol creado exitosamente", "rol_id": rol_id}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.put("/roles/{rol_id}")
+async def editar_rol(
+    rol_id: int,
+    data: RolUpdateRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Edita un rol personalizado."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute(
+            "SELECT rol_id, nombre, COALESCE(es_personalizado, FALSE) AS es_personalizado FROM rol WHERE rol_id = %s",
+            (rol_id,)
+        )
+        rol = cur.fetchone()
+        if not rol:
+            raise HTTPException(status_code=404, detail="Rol no encontrado")
+        if not rol["es_personalizado"]:
+            raise HTTPException(status_code=400, detail="Solo se pueden editar roles personalizados")
+
+        updates: dict = {}
+        if data.nombre is not None:
+            updates["nombre"] = data.nombre.lower().replace(" ", "_")
+        if data.descripcion is not None:
+            updates["descripcion"] = data.descripcion
+
+        if updates:
+            set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+            cur.execute(f"UPDATE rol SET {set_clause} WHERE rol_id = %s",
+                        list(updates.values()) + [rol_id])
+
+        _log_bitacora(cur, sa_id, "EDITAR_ROL", "rol", rol_id, "Rol editado", updates)
+        db.commit()
+        return {"success": True, "message": "Rol actualizado correctamente"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.patch("/roles/{rol_id}/estado")
+async def toggle_estado_rol(
+    rol_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Activa o desactiva un rol personalizado."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute(
+            "SELECT rol_id, nombre, COALESCE(es_personalizado, FALSE) AS es_personalizado FROM rol WHERE rol_id = %s",
+            (rol_id,)
+        )
+        rol = cur.fetchone()
+        if not rol:
+            raise HTTPException(status_code=404, detail="Rol no encontrado")
+        if not rol["es_personalizado"]:
+            raise HTTPException(status_code=400, detail="Solo se pueden cambiar de estado roles personalizados")
+
+        cur.execute("""
+            UPDATE rol
+            SET activo = CASE WHEN COALESCE(activo, TRUE) = TRUE THEN FALSE ELSE TRUE END
+            WHERE rol_id = %s
+            RETURNING rol_id, nombre, activo
+        """, (rol_id,))
+        row = cur.fetchone()
+
+        _log_bitacora(cur, sa_id, "CAMBIO_ESTADO_ROL", "rol", rol_id,
+                      f"Estado del rol '{row['nombre']}' cambiado a {row['activo']}")
+        db.commit()
+        return {"success": True, "rol_id": row["rol_id"],
+                "nombre": row["nombre"], "activo": row["activo"]}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.get("/roles/{rol_id}/permisos")
+async def get_rol_permisos(
+    rol_id: int,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Obtiene todos los permisos indicando cuáles están asignados al rol."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute("SELECT rol_id, nombre FROM rol WHERE rol_id = %s", (rol_id,))
+        rol = cur.fetchone()
+        if not rol:
+            raise HTTPException(status_code=404, detail="Rol no encontrado")
+
+        cur.execute("""
+            SELECT p.permiso_id, p.codigo, p.nombre, p.modulo,
+                   CASE WHEN rp.rol_id IS NOT NULL THEN TRUE ELSE FALSE END AS asignado
+            FROM permiso p
+            LEFT JOIN rol_permiso rp ON rp.permiso_id = p.permiso_id AND rp.rol_id = %s
+            WHERE p.activo = TRUE
+            ORDER BY p.modulo, p.nombre
+        """, (rol_id,))
+        permisos = cur.fetchall()
+
+        return {"success": True, "rol": dict(rol), "permisos": [dict(p) for p in permisos]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.put("/roles/{rol_id}/permisos")
+async def asignar_permisos_rol(
+    rol_id: int,
+    data: RolPermisosRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Reemplaza los permisos asignados a un rol."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+    sa_id = int(payload["sub"])
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute("SELECT rol_id, nombre FROM rol WHERE rol_id = %s", (rol_id,))
+        rol = cur.fetchone()
+        if not rol:
+            raise HTTPException(status_code=404, detail="Rol no encontrado")
+
+        cur.execute("DELETE FROM rol_permiso WHERE rol_id = %s", (rol_id,))
+        for permiso_id in data.permiso_ids:
+            cur.execute(
+                "INSERT INTO rol_permiso (rol_id, permiso_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (rol_id, permiso_id)
+            )
+
+        _log_bitacora(cur, sa_id, "ASIGNAR_PERMISOS_ROL", "rol", rol_id,
+                      f"Permisos actualizados para rol '{rol['nombre']}'",
+                      {"permiso_ids": data.permiso_ids})
+        db.commit()
+        return {"success": True,
+                "message": f"Permisos del rol '{rol['nombre']}' actualizados correctamente"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        cur.close()
+
+
+@router.get("/permisos")
+async def listar_permisos(
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """Lista todos los permisos disponibles del sistema."""
+    payload = get_token_payload(authorization)
+    _require_superadmin(payload)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        _ensure_roles_tables(cur)
+        db.commit()
+        cur.execute("SELECT * FROM permiso WHERE activo = TRUE ORDER BY modulo, nombre")
+        rows = cur.fetchall()
+        return {"success": True, "total": len(rows), "data": [dict(r) for r in rows]}
     except HTTPException:
         raise
     except Exception as e:

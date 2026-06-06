@@ -252,29 +252,22 @@ async def finalizar_servicio_tecnico(
                 (asignacion[2],)
             )
 
-        # Registrar pago
+        # Registrar pago en estado pendiente — el cliente elige y confirma el método de pago
         cur.execute("""
             INSERT INTO PAGO (
                 incidente_id, asignacion_id, monto_total, monto_servicio,
-                comision_plataforma, monto_taller, metodo_pago, estado, fecha_pago
+                comision_plataforma, monto_taller, estado
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'completado', CURRENT_TIMESTAMP)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pendiente')
             ON CONFLICT (incidente_id) DO UPDATE SET
-                monto_total = EXCLUDED.monto_total,
-                monto_servicio = EXCLUDED.monto_servicio,
-                comision_plataforma = EXCLUDED.comision_plataforma,
-                monto_taller = EXCLUDED.monto_taller,
-                metodo_pago = EXCLUDED.metodo_pago,
-                estado = 'completado',
-                fecha_pago = CURRENT_TIMESTAMP
+                monto_total          = EXCLUDED.monto_total,
+                monto_servicio       = EXCLUDED.monto_servicio,
+                comision_plataforma  = EXCLUDED.comision_plataforma,
+                monto_taller         = EXCLUDED.monto_taller,
+                estado               = CASE WHEN PAGO.estado = 'completado' THEN 'completado' ELSE 'pendiente' END
         """, (
-            asignacion[1],
-            asignacion_id,
-            data.costo,
-            data.costo,
-            comision,
-            monto_taller,
-            data.metodo_pago,
+            asignacion[1], asignacion_id,
+            data.costo, data.costo, comision, monto_taller,
         ))
 
         db.commit()

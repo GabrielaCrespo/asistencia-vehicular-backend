@@ -807,9 +807,62 @@ async def analitica_global(
         """, (org_id,))
         ranking = cur.fetchall()
 
+        # 7. KPIs de satisfacción: promedio global, top 5, distribución 1–5 estrellas
+        cur.execute("""
+            SELECT
+                COUNT(c.calificacion_id)                                         AS total_calificaciones,
+                COALESCE(ROUND(AVG(c.puntuacion)::NUMERIC, 2), 0)                AS promedio_tenant,
+                COALESCE(ROUND(((AVG(c.puntuacion) / 5.0) * 100)::NUMERIC, 1), 0) AS pct_satisfaccion
+            FROM calificacion c
+            JOIN taller t ON t.taller_id = c.taller_id
+            WHERE t.organizacion_id = %s
+        """, (org_id,))
+        sat_global = cur.fetchone()
+
+        cur.execute("""
+            SELECT
+                t.taller_id,
+                t.razon_social                                          AS nombre,
+                COUNT(c.calificacion_id)                                AS cantidad,
+                ROUND(AVG(c.puntuacion)::NUMERIC, 2)                    AS promedio
+            FROM taller t
+            JOIN calificacion c ON c.taller_id = t.taller_id
+            WHERE t.organizacion_id = %s
+            GROUP BY t.taller_id, t.razon_social
+            ORDER BY promedio DESC, cantidad DESC
+            LIMIT 5
+        """, (org_id,))
+        top5 = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                gs.estrellas,
+                COALESCE(cnt.cantidad, 0) AS cantidad
+            FROM generate_series(1, 5) AS gs(estrellas)
+            LEFT JOIN (
+                SELECT c.puntuacion AS estrellas, COUNT(*) AS cantidad
+                FROM calificacion c
+                JOIN taller t ON t.taller_id = c.taller_id
+                WHERE t.organizacion_id = %s
+                GROUP BY c.puntuacion
+            ) cnt ON cnt.estrellas = gs.estrellas
+            ORDER BY gs.estrellas
+        """, (org_id,))
+        distribucion = cur.fetchall()
+
         sla_ev = int(tiempos["total_evaluados_sla"] or 0)
         sla_cu = int(tiempos["sla_cumplidos"] or 0)
         sla_pct = round(sla_cu * 100.0 / sla_ev, 1) if sla_ev > 0 else None
+
+        taller_mejor = (
+            {
+                "taller_id": top5[0]["taller_id"],
+                "nombre":    top5[0]["nombre"],
+                "promedio":  float(top5[0]["promedio"] or 0),
+                "cantidad":  int(top5[0]["cantidad"] or 0),
+            }
+            if top5 else None
+        )
 
         return {
             "organizacion_id":      org_id,
@@ -836,6 +889,25 @@ async def analitica_global(
                 }
                 for r in ranking
             ],
+            "satisfaccion": {
+                "promedio_tenant":        float(sat_global["promedio_tenant"] or 0),
+                "total_calificaciones":   int(sat_global["total_calificaciones"] or 0),
+                "pct_satisfaccion":       float(sat_global["pct_satisfaccion"] or 0),
+                "taller_mejor_valorado":  taller_mejor,
+                "top5_talleres": [
+                    {
+                        "taller_id": r["taller_id"],
+                        "nombre":    r["nombre"],
+                        "promedio":  float(r["promedio"] or 0),
+                        "cantidad":  int(r["cantidad"] or 0),
+                    }
+                    for r in top5
+                ],
+                "distribucion": [
+                    {"estrellas": int(r["estrellas"]), "cantidad": int(r["cantidad"])}
+                    for r in distribucion
+                ],
+            },
         }
     except HTTPException:
         raise

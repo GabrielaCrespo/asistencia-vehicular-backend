@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 .env.local.*
+app/services/firebase_credentials.json
 
 # ─── Entornos virtuales Python ───────────────────────────────────────────────
 venv/

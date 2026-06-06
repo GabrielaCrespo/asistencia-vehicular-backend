@@ -11,6 +11,8 @@ from ..utils.tenant_deps import get_token_payload, assert_taller_access
 from ..managers.websocket_manager import manager
 from ..utils.bitacora import log_bitacora
 
+from ..services.firebase_service import enviar_notificacion_usuario
+
 router = APIRouter(prefix="/api/asignacion", tags=["Asignaciones"])
 
 
@@ -608,6 +610,14 @@ async def aceptar_solicitud(
                 "asignacion_id": asignacion_id,
                 "taller_id": taller_id
             }))
+            # Push notification
+            enviar_notificacion_usuario(
+                cliente_uid,
+                "¡Tu solicitud fue aceptada! 🚗",
+                f"{razon} aceptó tu solicitud y está preparando al técnico.",
+                {"incidente_id": str(data.incidente_id)},
+                db
+            )
 
         return AsignacionResponse(
             success=True,
@@ -681,6 +691,14 @@ async def rechazar_solicitud(
                 "mensaje": "Un taller no pudo atender tu solicitud. Seguimos buscando.",
                 "incidente_id": data.incidente_id
             }))
+            # Push notification
+            enviar_notificacion_usuario(
+                inc_row["usuario_id"],
+                "Taller no disponible 🚫",
+                "Un taller no pudo atenderte. Seguimos buscando otro disponible.",
+                {"incidente_id": str(data.incidente_id)},
+                db
+            )
 
         return MessageResponse(success=True, message="Solicitud rechazada")
 
@@ -735,10 +753,44 @@ async def asignar_tecnico(
         )
         cur.execute("UPDATE TECNICO SET disponible = FALSE WHERE tecnico_id = %s", (data.tecnico_id,))
 
+        cur.execute("""
+            SELECT i.usuario_id, t.nombre AS tecnico_nombre
+            FROM ASIGNACION a
+            JOIN INCIDENTE i ON a.incidente_id = i.incidente_id
+            LEFT JOIN TECNICO t ON t.tecnico_id = %s
+            WHERE a.asignacion_id = %s
+        """, (data.tecnico_id, asignacion_id))
+        notif_row = cur.fetchone()
+
         usuario_id_taller = int(token_payload.get("sub", 0))
         log_bitacora(cur, usuario_id_taller, 'ASIGNAR_TECNICO', 'asignacion',
                      asignacion_id, f'Técnico {data.tecnico_id} asignado a asignación {asignacion_id}')
         db.commit()
+
+        if notif_row:
+            nombre_tec = notif_row.get('tecnico_nombre') or 'Un técnico'
+            cliente_uid = notif_row['usuario_id']
+            crear_notificacion(
+                db, cliente_uid,
+                "tecnico_asignado",
+                "Técnico asignado",
+                f"{nombre_tec} ha sido asignado para atenderte.",
+                {"asignacion_id": asignacion_id},
+            )
+            asyncio.create_task(manager.send_to_user(cliente_uid, {
+                "tipo": "tecnico_asignado",
+                "titulo": "Técnico asignado",
+                "mensaje": f"{nombre_tec} ha sido asignado para atenderte.",
+                "asignacion_id": asignacion_id,
+            }))
+            enviar_notificacion_usuario(
+                cliente_uid,
+                "👨‍🔧 Técnico asignado",
+                f"{nombre_tec} se dirige a tu ubicación.",
+                {"asignacion_id": str(asignacion_id)},
+                db
+            )
+
         return MessageResponse(success=True, message="Técnico asignado correctamente")
 
     except HTTPException:
@@ -843,6 +895,15 @@ async def actualizar_estado(
                 "asignacion_id": asignacion_id,
                 "estado": data.estado
             }))
+             # Push notification
+            iconos = {'en_camino': '🚗', 'en_servicio': '🔧', 'completada': '✅'}
+            enviar_notificacion_usuario(
+                cliente_uid,
+                f"{iconos.get(data.estado, '')} {titulo_c}",
+                desc_c,
+                {"incidente_id": str(asignacion['incidente_id']), "estado": data.estado},
+                db
+            )
 
         return MessageResponse(success=True, message=f"Estado actualizado a '{data.estado}'")
 
@@ -952,6 +1013,14 @@ async def registrar_diagnostico(
                 "asignacion_id": asignacion_id,
                 "costo": data.costo
             }))
+            # Push notification
+            enviar_notificacion_usuario(
+                cliente_uid,
+                "✅ Servicio finalizado",
+                f"Tu asistencia ha concluido. Costo total: Bs {data.costo:.2f}.",
+                {"incidente_id": str(asignacion['incidente_id'])},
+                db
+            )
 
         return MessageResponse(success=True, message="Diagnóstico y costo registrados correctamente")
 

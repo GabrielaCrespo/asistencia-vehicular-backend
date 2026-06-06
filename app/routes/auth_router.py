@@ -9,6 +9,7 @@ import jwt
 from ..services.config import Config
 from ..classes.postgresql import Database
 from ..utils.tenant_deps import get_token_payload, assert_taller_access
+from ..utils.bitacora import log_bitacora
 
 # Router para autenticación de talleres
 router = APIRouter(prefix="/api/taller", tags=["Taller Authentication"])
@@ -151,12 +152,12 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
 
         nuevo_usuario_id = cur.fetchone()[0]
 
-        # 2. Insertar Taller con organizacion_id
+        # 2. Insertar Taller con organizacion_id y estado pendiente_asignacion
         cur.execute("""
             INSERT INTO TALLER (usuario_id, razon_social, direccion, latitud, longitud,
                                 telefono_operativo, horario_inicio, horario_fin,
-                                disponible, organizacion_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                                disponible, organizacion_id, estado)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, 'pendiente_asignacion')
             RETURNING taller_id
         """, (
             nuevo_usuario_id,
@@ -170,6 +171,10 @@ async def register_taller(data: TallerRegister, db=Depends(Database.get_db)):
             org_id,
         ))
         nuevo_taller_id = cur.fetchone()[0]
+
+        log_bitacora(cur, nuevo_usuario_id, 'REGISTRO_TALLER', 'taller',
+                     nuevo_taller_id, f'Registro taller: {data.razon_social}',
+                     {'email': data.email, 'org_id': org_id})
 
         # 3. Vincular todos los servicios base con disponible=FALSE para que el taller los active
         cur.execute("""
@@ -287,12 +292,16 @@ async def login_taller(data: LoginRequest, db=Depends(Database.get_db)):
             organizacion_id=user['organizacion_id'],
         )
 
+        log_bitacora(cur, user['usuario_id'], 'LOGIN_TALLER', 'usuario',
+                     user['taller_id'], f'Login taller: {user["email"]}')
+        db.commit()
+
         return LoginResponse(
             success=True,
             access_token=token,
             user=user_response
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -489,6 +498,9 @@ async def update_taller_profile(
             values = list(taller_updates.values()) + [taller_id]
             cur.execute(f"UPDATE TALLER SET {set_clause} WHERE taller_id = %s", values)
         print(f"[UPDATE TALLER] ✓ TALLER updated")
+
+        log_bitacora(cur, usuario_id, 'ACTUALIZAR_TALLER', 'taller',
+                     taller_id, 'Perfil de taller actualizado', taller_updates or None)
 
         # Commit and return IMMEDIATELY with updated data from first query
         print(f"[UPDATE TALLER] 🔐 Committing transaction...")

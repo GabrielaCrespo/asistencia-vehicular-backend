@@ -22,6 +22,7 @@ from .routes.historial_router import router as historial_router
 from .routes.organizacion_router import router as organizacion_router
 from .routes.cotizacion_router import router as cotizacion_router
 from .routes.calificacion_router import router as calificacion_router
+from .routes.superadmin_router import router as superadmin_router
 from .services.config import Config
 from .classes.postgresql import Database
 from .managers.websocket_manager import manager
@@ -71,6 +72,7 @@ app.include_router(historial_router)
 app.include_router(organizacion_router)
 app.include_router(cotizacion_router)
 app.include_router(calificacion_router)
+app.include_router(superadmin_router)
 
 
 # ===================== WEBSOCKET =====================

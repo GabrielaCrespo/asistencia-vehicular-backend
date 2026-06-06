@@ -5,6 +5,7 @@ from typing import Optional
 
 from ..classes.postgresql import Database
 from ..utils.tenant_deps import get_token_payload
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/vehiculo", tags=["Vehículos"])
 
@@ -52,6 +53,8 @@ async def registrar_vehiculo(data: VehiculoCreate, authorization: str = Header(N
         ))
 
         vehiculo_id = cur.fetchone()[0]
+        log_bitacora(cur, data.usuario_id, 'REGISTRAR_VEHICULO', 'vehiculo',
+                     vehiculo_id, f'Vehículo registrado: {data.placa} {data.marca} {data.modelo}')
         db.commit()
 
         return {"success": True, "message": "Vehículo registrado", "vehiculo_id": vehiculo_id}
@@ -111,6 +114,9 @@ async def eliminar_vehiculo(vehiculo_id: int, authorization: str = Header(None),
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Vehículo no encontrado")
 
+        usuario_id = int(payload.get("sub", 0))
+        log_bitacora(cur, usuario_id, 'ELIMINAR_VEHICULO', 'vehiculo',
+                     vehiculo_id, f'Vehículo {vehiculo_id} eliminado')
         db.commit()
         return {"success": True, "message": "Vehículo eliminado"}
 

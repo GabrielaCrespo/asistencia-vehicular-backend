@@ -8,6 +8,7 @@ import bcrypt
 from ..services.config import Config
 from ..classes.postgresql import Database
 from ..utils.tenant_deps import get_token_payload
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/cliente", tags=["Cliente Authentication"])
 
@@ -86,6 +87,9 @@ async def register_cliente(data: ClienteRegister, db=Depends(Database.get_db)):
         ))
 
         nuevo_usuario_id = cur.fetchone()[0]
+
+        log_bitacora(cur, nuevo_usuario_id, 'REGISTRO_CLIENTE', 'usuario',
+                     nuevo_usuario_id, f'Nuevo cliente registrado: {data.email}')
         db.commit()
 
         return RegisterResponse(
@@ -163,6 +167,10 @@ async def login_cliente(data: LoginRequest, db=Depends(Database.get_db)):
             rol_id=user['rol_id'],
             estado=user['estado']
         )
+
+        log_bitacora(cur, user['usuario_id'], 'LOGIN_CLIENTE', 'usuario',
+                     user['usuario_id'], f'Login cliente: {user["email"]}')
+        db.commit()
 
         return LoginResponse(
             success=True,

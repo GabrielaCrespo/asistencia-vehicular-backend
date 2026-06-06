@@ -14,6 +14,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 from ..classes.postgresql import Database
 from ..utils.tenant_deps import get_token_payload, assert_taller_access
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/tecnicos", tags=["Técnicos"])
 
@@ -149,8 +150,11 @@ async def crear_tecnico(
         ))
         
         tecnico = cur.fetchone()
+        usuario_id_req = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_req, 'CREAR_TECNICO', 'tecnico',
+                     tecnico['tecnico_id'], f'Técnico creado: {data.nombre} en taller {taller_id}')
         db.commit()
-        
+
         return TecnicoResponse(
             tecnico_id=tecnico['tecnico_id'],
             taller_id=tecnico['taller_id'],
@@ -359,8 +363,11 @@ async def actualizar_tecnico(
             """
             cur.execute(query, params)
             tecnico = cur.fetchone()
+            usuario_id_req = int(token_payload.get("sub", 0))
+            log_bitacora(cur, usuario_id_req, 'ACTUALIZAR_TECNICO', 'tecnico',
+                         tecnico_id, f'Técnico {tecnico_id} actualizado en taller {taller_id}')
             db.commit()
-        
+
         return TecnicoResponse(
             tecnico_id=tecnico['tecnico_id'],
             taller_id=tecnico['taller_id'],
@@ -441,6 +448,9 @@ async def eliminar_tecnico(
             "DELETE FROM TECNICO WHERE tecnico_id = %s AND taller_id = %s",
             (tecnico_id, taller_id)
         )
+        usuario_id_req = int(token_payload.get("sub", 0))
+        log_bitacora(cur, usuario_id_req, 'ELIMINAR_TECNICO', 'tecnico',
+                     tecnico_id, f'Técnico {tecnico_id} eliminado de taller {taller_id}')
         db.commit()
         
         return MessageResponse(

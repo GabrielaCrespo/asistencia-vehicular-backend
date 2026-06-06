@@ -8,6 +8,7 @@ from typing import Optional
 from ..services.config import Config
 from ..classes.postgresql import Database
 from ..utils.tenant_deps import get_token_payload
+from ..utils.bitacora import log_bitacora
 
 router = APIRouter(prefix="/api/tecnico", tags=["Técnico Auth"])
 
@@ -70,6 +71,10 @@ async def login_tecnico(data: TecnicoLogin, db=Depends(Database.get_db)):
             "exp": datetime.now(tz=timezone.utc) + timedelta(hours=24)
         }
         token = jwt.encode(token_payload, Config.SECRET_KEY, algorithm=Config.ALGORITHM)
+
+        log_bitacora(cur, tecnico['usuario_id'], 'LOGIN_TECNICO', 'usuario',
+                     tecnico['tecnico_id'], f'Login técnico: {data.email}')
+        db.commit()
 
         return TecnicoLoginResponse(
             success=True,

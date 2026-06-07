@@ -7,6 +7,7 @@ from ..services.config import Config
 class ConnectionManager:
     def __init__(self):
         self.active: Dict[int, Set[WebSocket]] = {}
+        self.ultima_ubicacion: Dict[int, dict] = {}  # incidente_id → {data, cliente_uid, taller_uid}
 
     async def connect(self, websocket: WebSocket, usuario_id: int):
         await websocket.accept()
@@ -14,6 +15,15 @@ class ConnectionManager:
             self.active[usuario_id] = set()
         self.active[usuario_id].add(websocket)
         print(f"[WS] Usuario {usuario_id} conectado. Total conexiones: {len(self.active)}")
+
+        # Enviar última ubicación conocida si el usuario es cliente o taller de algún incidente activo
+        for incidente_id, info in self.ultima_ubicacion.items():
+            if info.get('cliente_uid') == usuario_id or info.get('taller_uid') == usuario_id:
+                try:
+                    await websocket.send_json(info['data'])
+                    print(f"[WS] Última ubicación enviada a usuario {usuario_id} para incidente {incidente_id}")
+                except Exception as e:
+                    print(f"[WS] Error enviando última ubicación: {e}")
 
     def disconnect(self, websocket: WebSocket, usuario_id: int):
         if usuario_id in self.active:
@@ -61,6 +71,13 @@ class ConnectionManager:
             row = cur.fetchone()
             cur.close()
             if row:
+                # Guardar última ubicación conocida
+                self.ultima_ubicacion[incidente_id] = {
+                    'data': data,
+                    'cliente_uid': row['cliente_uid'],
+                    'taller_uid': row['taller_uid'],
+                }
+                # Reenviar al cliente y al taller
                 await self.send_to_user(row["cliente_uid"], data)
                 await self.send_to_user(row["taller_uid"], data)
                 print(f"[WS] Ubicación reenviada a cliente {row['cliente_uid']} y taller {row['taller_uid']}")
@@ -78,7 +95,6 @@ class ConnectionManager:
             from psycopg2.extras import RealDictCursor
             cur = db.cursor(cursor_factory=RealDictCursor)
 
-            # Obtener cliente_uid y tecnico_uid del incidente
             cur.execute("""
                 SELECT i.usuario_id AS cliente_uid,
                        tc.usuario_id AS tecnico_uid,
@@ -97,7 +113,6 @@ class ConnectionManager:
                 cur.close()
                 return
 
-            # Guardar mensaje en BD
             cur.execute("""
                 INSERT INTO chat_mensaje (incidente_id, usuario_id, rol, mensaje)
                 VALUES (%s, %s, %s, %s)
@@ -112,7 +127,6 @@ class ConnectionManager:
             db.commit()
             cur.close()
 
-            # Preparar mensaje para enviar
             msg_data = {
                 "tipo": "chat_mensaje",
                 "mensaje_id": msg_row["mensaje_id"],
@@ -124,7 +138,6 @@ class ConnectionManager:
                 "fecha_creacion": str(msg_row["fecha_creacion"]),
             }
 
-            # Reenviar al otro participante
             if remitente_uid == row["cliente_uid"]:
                 await self.send_to_user(row["tecnico_uid"], msg_data)
                 print(f"[WS] Chat: cliente {remitente_uid} → técnico {row['tecnico_uid']}")

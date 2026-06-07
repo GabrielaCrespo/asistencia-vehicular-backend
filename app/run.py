@@ -23,6 +23,8 @@ from .routes.organizacion_router import router as organizacion_router
 from .routes.cotizacion_router import router as cotizacion_router
 from .routes.calificacion_router import router as calificacion_router
 from .routes.superadmin_router import router as superadmin_router
+from .routes.stripe_router import router as stripe_router
+from .routes.chat_router import router as chat_router
 from .services.config import Config
 from .classes.postgresql import Database
 from .managers.websocket_manager import manager
@@ -73,6 +75,8 @@ app.include_router(organizacion_router)
 app.include_router(cotizacion_router)
 app.include_router(calificacion_router)
 app.include_router(superadmin_router)
+app.include_router(stripe_router)
+app.include_router(chat_router)
 
 
 # ===================== WEBSOCKET =====================
@@ -107,6 +111,10 @@ async def websocket_endpoint(
                         db = next(Database.get_db())
                         await manager.forward_to_incident_client(usuario_id, msg, db)
                         print(f"[WS] ✅ forward ejecutado")
+                    elif msg.get("tipo") == "chat_mensaje":
+                        print(f"[WS] 💬 Chat de usuario {usuario_id}: {msg.get('mensaje')}")
+                        db = next(Database.get_db())
+                        await manager.forward_chat_message(usuario_id, msg, db)
                 except Exception as e:
                     print(f"[WS] ❌ Error: {e}")
     except WebSocketDisconnect:

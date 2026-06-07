@@ -39,3 +39,8 @@ class Config:
     CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
 
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+    STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY", "")
+    STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+    STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    STRIPE_CURRENCY        = os.getenv("STRIPE_CURRENCY", "usd")

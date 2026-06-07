@@ -886,6 +886,12 @@ async def actualizar_estado(
                      asignacion_id, f'Estado asignación {asignacion_id}: {asignacion["estado"]} → {data.estado}')
         db.commit()
 
+        # Limpiar última ubicación si el servicio se completó
+        if data.estado == 'completada':
+            if asignacion['incidente_id'] in manager.ultima_ubicacion:
+                del manager.ultima_ubicacion[asignacion['incidente_id']]
+                print(f"[WS] Mapa limpiado para incidente {asignacion['incidente_id']}")
+
         if cliente_uid and titulo_c:
             asyncio.create_task(manager.send_to_user(cliente_uid, {
                 "tipo": f"estado_{data.estado}",

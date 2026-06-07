@@ -59,14 +59,14 @@ class ConnectionManager:
             cur = db.cursor(cursor_factory=RealDictCursor)
             cur.execute("""
                 SELECT i.usuario_id AS cliente_uid,
-                       ta.usuario_id AS taller_uid
+                    ta.usuario_id AS taller_uid
                 FROM INCIDENTE i
                 JOIN ASIGNACION a ON a.incidente_id = i.incidente_id
                 JOIN TECNICO tc ON a.tecnico_id = tc.tecnico_id
                 JOIN TALLER ta ON tc.taller_id = ta.taller_id
                 WHERE i.incidente_id = %s
-                  AND tc.usuario_id = %s
-                  AND a.estado IN ('en_camino', 'en_servicio')
+                AND tc.usuario_id = %s
+                AND a.estado IN ('en_camino', 'en_servicio')
             """, (incidente_id, tecnico_usuario_id))
             row = cur.fetchone()
             cur.close()
@@ -75,12 +75,17 @@ class ConnectionManager:
                 self.ultima_ubicacion[incidente_id] = {
                     'data': data,
                     'cliente_uid': row['cliente_uid'],
-                    'taller_uid': row['taller_uid'],
+                    'taller_uid': row['taller_uid']
                 }
                 # Reenviar al cliente y al taller
                 await self.send_to_user(row["cliente_uid"], data)
                 await self.send_to_user(row["taller_uid"], data)
                 print(f"[WS] Ubicación reenviada a cliente {row['cliente_uid']} y taller {row['taller_uid']}")
+            else:
+                # Servicio terminado — limpiar última ubicación
+                if incidente_id in self.ultima_ubicacion:
+                    del self.ultima_ubicacion[incidente_id]
+                    print(f"[WS] Última ubicación limpiada para incidente {incidente_id}")
         except Exception as e:
             print(f"[WS] Error reenviando ubicación: {e}")
 

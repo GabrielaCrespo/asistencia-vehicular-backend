@@ -169,7 +169,7 @@ async def resumen_historial(
                 COUNT(c.calificacion_id)              AS total_calificaciones
             FROM ASIGNACION a
             LEFT JOIN PAGO p        ON p.asignacion_id = a.asignacion_id AND p.estado = 'completado'
-            LEFT JOIN CALIFICACION c ON c.incidente_id = a.incidente_id
+            LEFT JOIN CALIFICACION c ON c.incidente_id = a.incidente_id AND c.taller_id = a.taller_id
             WHERE a.taller_id = %s {fecha_filtro}
         """, params_base)
         financiero = cur.fetchone()
@@ -283,7 +283,7 @@ async def historial_solicitudes(
             LEFT JOIN TECNICO t      ON t.tecnico_id    = a.tecnico_id
             LEFT JOIN VEHICULO v     ON v.vehiculo_id   = i.vehiculo_id
             LEFT JOIN PAGO p         ON p.asignacion_id = a.asignacion_id AND p.estado = 'completado'
-            LEFT JOIN CALIFICACION c ON c.incidente_id  = a.incidente_id
+            LEFT JOIN CALIFICACION c ON c.incidente_id  = a.incidente_id AND c.taller_id = a.taller_id
             WHERE a.taller_id = %s {filtros}
             ORDER BY a.fecha_asignacion DESC
             LIMIT %s OFFSET %s

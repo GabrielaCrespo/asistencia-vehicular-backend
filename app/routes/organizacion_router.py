@@ -1087,6 +1087,235 @@ async def analitica_taller(
         cur.close()
 
 
+@router.get("/{org_id}/mapa-riesgo")
+async def mapa_riesgo(
+    org_id: int,
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    tipo_problema: Optional[str] = None,
+    taller_id: Optional[int] = None,
+    estado: Optional[str] = None,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """
+    Analítica geográfica de riesgo vehicular para el mapa inteligente.
+    Devuelve puntos de calor, zonas peligrosas, tipos de incidente,
+    horarios críticos y KPIs geográficos. Soporta filtros avanzados.
+    """
+    payload = get_token_payload(authorization)
+    assert_org_access(payload, org_id)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Build dynamic WHERE conditions
+        conditions = ["t.organizacion_id = %s"]
+        params: list = [org_id]
+
+        if fecha_desde:
+            conditions.append("i.fecha_creacion >= %s")
+            params.append(fecha_desde)
+        if fecha_hasta:
+            conditions.append("i.fecha_creacion < (%s::date + INTERVAL '1 day')")
+            params.append(fecha_hasta)
+        if tipo_problema:
+            conditions.append("i.tipo_problema = %s")
+            params.append(tipo_problema)
+        if taller_id:
+            conditions.append("a.taller_id = %s")
+            params.append(taller_id)
+        if estado:
+            conditions.append("i.estado = %s")
+            params.append(estado)
+
+        where_base = " AND ".join(conditions)
+        where_geo  = where_base + " AND i.latitud IS NOT NULL AND i.longitud IS NOT NULL"
+
+        join_frag = """
+            FROM incidente i
+            JOIN asignacion a ON a.incidente_id = i.incidente_id
+            JOIN taller t     ON t.taller_id    = a.taller_id
+        """
+
+        # 1. Heat-map points grouped by ~1.1 km grid (2 decimal places)
+        cur.execute(f"""
+            SELECT
+                ROUND(i.latitud::NUMERIC,  2) AS lat,
+                ROUND(i.longitud::NUMERIC, 2) AS lng,
+                COUNT(DISTINCT i.incidente_id) AS cantidad
+            {join_frag}
+            WHERE {where_geo}
+            GROUP BY ROUND(i.latitud::NUMERIC, 2), ROUND(i.longitud::NUMERIC, 2)
+            ORDER BY cantidad DESC
+        """, params)
+        puntos_raw = cur.fetchall()
+
+        # 2. Dangerous zones (top 10, coarser ~11 km grid) with avg response time
+        cur.execute(f"""
+            SELECT
+                ROUND(i.latitud::NUMERIC,  1) AS lat,
+                ROUND(i.longitud::NUMERIC, 1) AS lng,
+                COUNT(DISTINCT i.incidente_id) AS cantidad,
+                ROUND(AVG(
+                    CASE WHEN a.fecha_aceptacion IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                    END
+                )::NUMERIC, 2) AS tiempo_prom_min
+            {join_frag}
+            WHERE {where_geo}
+            GROUP BY ROUND(i.latitud::NUMERIC, 1), ROUND(i.longitud::NUMERIC, 1)
+            ORDER BY cantidad DESC
+            LIMIT 10
+        """, params)
+        zonas_raw = cur.fetchall()
+
+        # 3. Total emergencies
+        cur.execute(f"""
+            SELECT COUNT(DISTINCT i.incidente_id) AS total
+            {join_frag}
+            WHERE {where_base}
+        """, params)
+        total = int((cur.fetchone() or {}).get("total") or 0)
+
+        # 4. Incidents by type
+        cur.execute(f"""
+            SELECT
+                COALESCE(i.tipo_problema, 'otro') AS tipo,
+                COUNT(DISTINCT i.incidente_id)    AS cantidad
+            {join_frag}
+            WHERE {where_base}
+            GROUP BY i.tipo_problema
+            ORDER BY cantidad DESC
+        """, params)
+        tipos_raw = cur.fetchall()
+
+        # 5. Critical hours (0–23)
+        cur.execute(f"""
+            SELECT
+                EXTRACT(HOUR FROM i.fecha_creacion)::INT AS hora,
+                COUNT(DISTINCT i.incidente_id)           AS cantidad
+            {join_frag}
+            WHERE {where_base}
+            GROUP BY EXTRACT(HOUR FROM i.fecha_creacion)
+            ORDER BY hora
+        """, params)
+        horas_raw = cur.fetchall()
+
+        # 6. Critical days (0=Sun … 6=Sat)
+        cur.execute(f"""
+            SELECT
+                EXTRACT(DOW FROM i.fecha_creacion)::INT AS dia_num,
+                COUNT(DISTINCT i.incidente_id)          AS cantidad
+            {join_frag}
+            WHERE {where_base}
+            GROUP BY EXTRACT(DOW FROM i.fecha_creacion)
+            ORDER BY dia_num
+        """, params)
+        dias_raw = cur.fetchall()
+
+        # 7. Overall average response time
+        cur.execute(f"""
+            SELECT ROUND(AVG(
+                CASE WHEN a.fecha_aceptacion IS NOT NULL
+                     THEN EXTRACT(EPOCH FROM (a.fecha_asignacion - i.fecha_creacion)) / 60
+                END
+            )::NUMERIC, 2) AS tiempo_prom
+            {join_frag}
+            WHERE {where_base}
+        """, params)
+        tiempo_row = cur.fetchone()
+
+        # 8. Talleres list for filter dropdown
+        cur.execute("""
+            SELECT taller_id, razon_social
+            FROM taller WHERE organizacion_id = %s ORDER BY razon_social
+        """, (org_id,))
+        talleres_raw = cur.fetchall()
+
+        # ── Process -------------------------------------------------
+
+        def nivel(cantidad: int, max_val: int) -> str:
+            ratio = cantidad / max_val if max_val > 0 else 0
+            return "alto" if ratio >= 0.66 else "medio" if ratio >= 0.33 else "bajo"
+
+        max_fine  = max((int(r["cantidad"]) for r in puntos_raw), default=1)
+        max_coarse = max((int(r["cantidad"]) for r in zonas_raw),  default=1)
+
+        puntos_calor = [
+            {
+                "lat":        float(r["lat"]),
+                "lng":        float(r["lng"]),
+                "cantidad":   int(r["cantidad"]),
+                "intensidad": round(int(r["cantidad"]) / max_fine, 3),
+                "nivel":      nivel(int(r["cantidad"]), max_fine),
+            }
+            for r in puntos_raw
+        ]
+
+        zonas_peligrosas = [
+            {
+                "nombre":                   f"Zona #{i + 1}",
+                "lat":                      float(r["lat"]),
+                "lng":                      float(r["lng"]),
+                "cantidad":                 int(r["cantidad"]),
+                "nivel_riesgo":             nivel(int(r["cantidad"]), max_coarse),
+                "tiempo_prom_atencion_min": float(r["tiempo_prom_min"]) if r.get("tiempo_prom_min") is not None else None,
+            }
+            for i, r in enumerate(zonas_raw)
+        ]
+
+        total_tipos = sum(int(r["cantidad"]) for r in tipos_raw) or 1
+        tipos_incidente = [
+            {
+                "tipo":        r["tipo"],
+                "cantidad":    int(r["cantidad"]),
+                "porcentaje":  round(int(r["cantidad"]) * 100.0 / total_tipos, 1),
+            }
+            for r in tipos_raw
+        ]
+
+        horas_dict = {int(r["hora"]): int(r["cantidad"]) for r in horas_raw}
+        por_hora = [{"hora": h, "cantidad": horas_dict.get(h, 0)} for h in range(24)]
+
+        DIAS_ES = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"]
+        dias_dict = {int(r["dia_num"]): int(r["cantidad"]) for r in dias_raw}
+        por_dia = [{"dia": d, "nombre_dia": DIAS_ES[d], "cantidad": dias_dict.get(d, 0)} for d in range(7)]
+
+        hora_mayor = max(por_hora, key=lambda x: x["cantidad"], default=None)
+        tiempo_prom_global = (
+            float(tiempo_row["tiempo_prom"])
+            if tiempo_row and tiempo_row.get("tiempo_prom") is not None
+            else None
+        )
+
+        return {
+            "organizacion_id":   org_id,
+            "total_emergencias": total,
+            "puntos_calor":      puntos_calor,
+            "zonas_peligrosas":  zonas_peligrosas,
+            "tipos_incidente":   tipos_incidente,
+            "horarios_criticos": {"por_hora": por_hora, "por_dia": por_dia},
+            "kpis": {
+                "total_emergencias":           total,
+                "zona_mayor_riesgo":           zonas_peligrosas[0] if zonas_peligrosas else None,
+                "tipo_mas_frecuente":          tipos_incidente[0] if tipos_incidente else None,
+                "horario_mayor_incidencia":    hora_mayor,
+                "tiempo_promedio_atencion_min": tiempo_prom_global,
+            },
+            "talleres": [
+                {"taller_id": r["taller_id"], "razon_social": r["razon_social"]}
+                for r in talleres_raw
+            ],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculando mapa de riesgo: {str(e)}")
+    finally:
+        cur.close()
+
+
 @router.get("/{org_id}/reportes")
 async def reportes_financieros_org(
     org_id: int,

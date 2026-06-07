@@ -578,3 +578,54 @@ async def update_taller_profile(
         raise HTTPException(status_code=500, detail=f"Error al actualizar perfil: {str(e)}")
     finally:
         cur.close()
+
+
+# ===================== DASHBOARD STATS =====================
+
+class TallerDashboardStats(BaseModel):
+    servicios_completados: int
+    solicitudes_activas: int
+    calificacion_promedio: float
+    ingresos_netos: float
+
+
+@router.get("/{taller_id}/stats", response_model=TallerDashboardStats)
+async def taller_dashboard_stats(
+    taller_id: int,
+    payload: dict = Depends(get_token_payload),
+    db=Depends(Database.get_db),
+):
+    """KPIs del dashboard principal del taller."""
+    assert_taller_access(payload, taller_id, db)
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE a.estado = 'completada')                              AS servicios_completados,
+                COUNT(*) FILTER (WHERE a.estado IN ('pendiente','aceptada','en_camino','en_servicio')) AS solicitudes_activas,
+                COALESCE(SUM(p.monto_taller) FILTER (WHERE p.estado = 'completado'), 0)     AS ingresos_netos
+            FROM ASIGNACION a
+            LEFT JOIN PAGO p ON p.asignacion_id = a.asignacion_id
+            WHERE a.taller_id = %s
+        """, (taller_id,))
+        row = cur.fetchone()
+
+        cur.execute("""
+            SELECT COALESCE(calificacion_promedio, 0) AS calificacion_promedio
+            FROM TALLER WHERE taller_id = %s
+        """, (taller_id,))
+        taller_row = cur.fetchone()
+
+        return TallerDashboardStats(
+            servicios_completados=int(row["servicios_completados"] or 0),
+            solicitudes_activas=int(row["solicitudes_activas"] or 0),
+            calificacion_promedio=float(taller_row["calificacion_promedio"] if taller_row else 0),
+            ingresos_netos=float(row["ingresos_netos"] or 0),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas: {str(e)}")
+    finally:
+        cur.close()

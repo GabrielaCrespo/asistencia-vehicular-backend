@@ -2,6 +2,7 @@ import os
 import jwt
 import uvicorn
 import json
+import asyncio
 from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -102,26 +103,37 @@ async def websocket_endpoint(
             "usuario_id": usuario_id
         })
         while True:
-            data = await websocket.receive_text()
-            if data == "ping":
-                await websocket.send_json({"tipo": "pong"})
-            else:
+            try:
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=20.0
+                )
+                if data == "ping":
+                    await websocket.send_json({"tipo": "pong"})
+                else:
+                    try:
+                        msg = json.loads(data)
+                        if msg.get("tipo") == "ubicacion_tecnico":
+                            print(f"[WS] ✅ Técnico {usuario_id} envió ubicación: lat={msg.get('latitud')}, lng={msg.get('longitud')}, incidente={msg.get('incidente_id')}")
+                            db = next(Database.get_db())
+                            await manager.forward_to_incident_client(usuario_id, msg, db)
+                            print(f"[WS] ✅ forward ejecutado")
+                        elif msg.get("tipo") == "chat_mensaje":
+                            print(f"[WS] 💬 Chat de usuario {usuario_id}: {msg.get('mensaje')}")
+                            db = next(Database.get_db())
+                            await manager.forward_chat_message(usuario_id, msg, db)
+                    except Exception as e:
+                        print(f"[WS] ❌ Error: {e}")
+            except asyncio.TimeoutError:
+                # Enviar ping del servidor para mantener la conexión viva
                 try:
-                    msg = json.loads(data)
-                    if msg.get("tipo") == "ubicacion_tecnico":
-                        print(f"[WS] ✅ Técnico {usuario_id} envió ubicación: lat={msg.get('latitud')}, lng={msg.get('longitud')}, incidente={msg.get('incidente_id')}")
-                        db = next(Database.get_db())
-                        await manager.forward_to_incident_client(usuario_id, msg, db)
-                        print(f"[WS] ✅ forward ejecutado")
-                    elif msg.get("tipo") == "chat_mensaje":
-                        print(f"[WS] 💬 Chat de usuario {usuario_id}: {msg.get('mensaje')}")
-                        db = next(Database.get_db())
-                        await manager.forward_chat_message(usuario_id, msg, db)
-                except Exception as e:
-                    print(f"[WS] ❌ Error: {e}")
+                    await websocket.send_json({"tipo": "ping_server"})
+                except Exception:
+                    break
     except WebSocketDisconnect:
         manager.disconnect(websocket, usuario_id)
-
+    except Exception:
+        manager.disconnect(websocket, usuario_id)
 
 @app.get("/")
 def index():

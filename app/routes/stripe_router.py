@@ -46,6 +46,12 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class VerificarPagoRequest(BaseModel):
+    pago_id: int
+    payment_intent_id: str
+    tipo: str = "servicio"  # "servicio" | "comision"
+
+
 # ===================== ENDPOINTS =====================
 
 @router.get("/config", response_model=StripeConfigResponse)
@@ -258,6 +264,61 @@ def confirmar_pago_efectivo(
     except HTTPException:
         db.rollback()
         raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+
+
+@router.post("/verificar-pago", response_model=MessageResponse)
+def verificar_pago(
+    body: VerificarPagoRequest,
+    authorization: str = Header(None),
+    db=Depends(Database.get_db),
+):
+    """
+    Verifica con la API de Stripe que el PaymentIntent fue exitoso y actualiza la BD.
+    Usado como fallback directo desde el frontend, sin depender del webhook.
+    """
+    get_token_payload(authorization)
+
+    try:
+        intent = stripe.PaymentIntent.retrieve(body.payment_intent_id)
+    except stripe.StripeError as e:
+        raise HTTPException(status_code=502, detail=f"Error de Stripe: {str(e)}")
+
+    if intent.status != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail=f"El pago no fue confirmado por Stripe (estado: {intent.status})"
+        )
+
+    cur = db.cursor()
+    try:
+        if body.tipo == "comision":
+            cur.execute(
+                """
+                UPDATE PAGO
+                SET estado_comision     = 'pagado',
+                    fecha_pago_comision = CURRENT_TIMESTAMP
+                WHERE pago_id = %s AND estado_comision != 'pagado'
+                """,
+                (body.pago_id,),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE PAGO
+                SET estado      = 'completado',
+                    metodo_pago = 'stripe',
+                    fecha_pago  = CURRENT_TIMESTAMP
+                WHERE pago_id = %s AND estado != 'completado'
+                """,
+                (body.pago_id,),
+            )
+        db.commit()
+        return MessageResponse(success=True, message="Pago verificado y registrado correctamente")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
